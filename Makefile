@@ -36,9 +36,9 @@ endif
 #
 
 BUILD_TYPE?=
-# keep standard at C11 and C++11
+# keep standard at C11 and C++17 (required by llama.cpp)
 CFLAGS   = -I./llama.cpp -I. -O3 -DNDEBUG -std=c11 -fPIC
-CXXFLAGS = -I./llama.cpp -I. -I./llama.cpp/common -I./common -O3 -DNDEBUG -std=c++11 -fPIC
+CXXFLAGS = -I./llama.cpp -I. -I./llama.cpp/common -I./common -O3 -DNDEBUG -std=c++17 -fPIC
 LDFLAGS  =
 
 # warnings
@@ -126,6 +126,10 @@ ifneq ($(filter armv8%,$(UNAME_M)),)
 	# Raspberry Pi 4
 	CFLAGS += -mfp16-format=ieee -mno-unaligned-access
 endif
+
+# Default CMAKE args - disable features not needed for basic bindings
+CMAKE_ARGS ?=
+CMAKE_ARGS += -DLLAMA_CURL=OFF
 
 ifeq ($(BUILD_TYPE),openblas)
 	EXTRA_LIBS=
@@ -229,16 +233,17 @@ llama.cpp/llama.o: llama.cpp/ggml.o
 llama.cpp/common.o: llama.cpp/ggml.o
 	cd build && cp -rf common/CMakeFiles/common.dir/common.cpp.o ../llama.cpp/common.o
 
-binding.o: prepare
-	$(CXX) $(CXXFLAGS) -I./llama.cpp -I./llama.cpp/common binding.cpp -o binding.o -c $(LDFLAGS)
+binding.o: prepare llama.cpp/ggml.o
+	$(CXX) $(CXXFLAGS) -I./llama.cpp -I./llama.cpp/common -I./llama.cpp/include -I./llama.cpp/ggml/include binding.cpp -o binding.o -c $(LDFLAGS)
 
 ## https://github.com/ggerganov/llama.cpp/pull/1902
 prepare:
-	cd llama.cpp && patch -p1 < ../patches/1902-cuda.patch
+	cd llama.cpp && patch -p1 --forward < ../patches/1902-cuda.patch || true
 	touch $@
 
-libbinding.a: llama.cpp/ggml.o llama.cpp/k_quants.o llama.cpp/ggml-alloc.o llama.cpp/common.o llama.cpp/grammar-parser.o llama.cpp/llama.o binding.o $(EXTRA_TARGETS)
-	ar src libbinding.a llama.cpp/ggml.o llama.cpp/k_quants.o llama.cpp/ggml-alloc.o llama.cpp/common.o llama.cpp/grammar-parser.o llama.cpp/llama.o binding.o $(EXTRA_TARGETS)
+# For the new llama.cpp, we need to link against the static libraries built by CMake
+libbinding.a: prepare binding.o llama.cpp/ggml.o
+	ar rcs libbinding.a binding.o
 
 clean:
 	rm -rf *.o
