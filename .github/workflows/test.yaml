@@ -30,7 +30,7 @@ jobs:
         run: go version
       - name: Test
         run: |
-          make test
+          CMAKE_ARGS="-DLLAMA_CURL=OFF" make test
 
   macOS-latest:
     runs-on: macOS-latest
@@ -51,7 +51,7 @@ jobs:
         run: go version
       - name: Test
         run: |
-          CMAKE_ARGS="-DLLAMA_METAL=OFF -DLLAMA_F16C=OFF -DLLAMA_AVX512=OFF -DLLAMA_AVX2=OFF -DLLAMA_FMA=OFF" make test
+          CMAKE_ARGS="-DLLAMA_CURL=OFF -DLLAMA_METAL=OFF -DLLAMA_F16C=OFF -DLLAMA_AVX512=OFF -DLLAMA_AVX2=OFF -DLLAMA_FMA=OFF" make test
 
   macOS-metal-latest:
     runs-on: macOS-latest
@@ -72,5 +72,5 @@ jobs:
         run: go version
       - name: Test
         run: |
-          CMAKE_ARGS="-DLLAMA_F16C=OFF -DLLAMA_AVX512=OFF -DLLAMA_AVX2=OFF -DLLAMA_FMA=OFF" make BUILD_TYPE=metal test
+          CMAKE_ARGS="-DLLAMA_CURL=OFF -DLLAMA_F16C=OFF -DLLAMA_AVX512=OFF -DLLAMA_AVX2=OFF -DLLAMA_FMA=OFF" make BUILD_TYPE=metal test
           CGO_LDFLAGS="-framework Foundation -framework Metal -framework MetalKit -framework MetalPerformanceShaders" LIBRARY_PATH=$PWD C_INCLUDE_PATH=$PWD go build -o testbuild ./examples
