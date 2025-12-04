@@ -220,6 +220,7 @@ llama.cpp/ggml-opencl.o: llama.cpp/ggml.o
 llama.cpp/ggml-metal.o: llama.cpp/ggml.o
 	cd build && cp -rf ggml/src/CMakeFiles/ggml.dir/ggml-metal.m.o ../llama.cpp/ggml-metal.o
 
+# Note: k_quants.o target kept for backwards compatibility, but sources from ggml-quants.c.o
 llama.cpp/k_quants.o: llama.cpp/ggml.o
 	cd build && cp -rf ggml/src/CMakeFiles/ggml-base.dir/ggml-quants.c.o ../llama.cpp/k_quants.o
 

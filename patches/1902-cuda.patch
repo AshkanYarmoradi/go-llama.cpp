@@ -57,7 +57,8 @@ index 9999999..9999998 100644
 +        const std::regex regex{R"([,/]+)"};
 +        std::sregex_token_iterator it{arg_next.begin(), arg_next.end(), regex, -1};
 +        std::vector<std::string> split_arg{it, {}};
-+        for (size_t i = 0; i < 128 && i < split_arg.size(); ++i) {
++        const size_t max_split = sizeof(lparams->tensor_split) / sizeof(lparams->tensor_split[0]);
++        for (size_t i = 0; i < max_split && i < split_arg.size(); ++i) {
 +            lparams->tensor_split[i] = std::stof(split_arg[i]);
 +        }
 +    }
