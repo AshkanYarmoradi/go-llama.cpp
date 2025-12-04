@@ -213,7 +213,7 @@ llama.cpp/ggml-alloc.o: llama.cpp/ggml.o
 
 llama.cpp/ggml.o: prepare
 	mkdir -p build
-	cd build && CC="$(CC)" CXX="$(CXX)" cmake ../llama.cpp $(CMAKE_ARGS) && VERBOSE=1 cmake --build . --config Release && cp -rf CMakeFiles/ggml.dir/ggml.c.o ../llama.cpp/ggml.o
+	cd build && CC="$(CC)" CXX="$(CXX)" cmake ../llama.cpp $(CMAKE_ARGS) && VERBOSE=1 cmake --build . --config Release && cp -rf ggml/src/CMakeFiles/ggml-base.dir/ggml.c.o ../llama.cpp/ggml.o
 
 llama.cpp/ggml-cuda.o: llama.cpp/ggml.o
 	cd build && cp -rf "$(GGML_CUDA_OBJ_PATH)" ../llama.cpp/ggml-cuda.o
