@@ -12,4 +12,4 @@ prepare
 Thumbs.db
 
 # model files downloaded by the test script
-ggllm-test-model.bin
+ggllm-test-model.bin_codeql_detected_source_root
