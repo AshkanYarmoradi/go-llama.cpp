@@ -15,15 +15,13 @@ type ModelOptions struct {
 	TensorSplit   string
 	FreqRopeBase  float32
 	FreqRopeScale float32
-	MulMatQ       *bool
 	LoraBase      string
 	LoraAdapter   string
-	Perplexity    bool
 }
 
 type PredictOptions struct {
 	Seed, Threads, Tokens, TopK, Repeat, Batch, NKeep int
-	TopP, Temperature, Penalty                        float32
+	TopP, MinP, Temperature, Penalty                  float32
 	NDraft                                            int
 	F16KV                                             bool
 	DebugMode                                         bool
@@ -52,9 +50,18 @@ type PredictOptions struct {
 	RopeFreqBase  float32
 	RopeFreqScale float32
 
-	// Negative prompt parameters
-	NegativePromptScale float32
-	NegativePrompt      string
+	// XTC sampling parameters
+	XTCProbability float32
+	XTCThreshold   float32
+
+	// DRY sampling parameters (Don't Repeat Yourself)
+	DRYMultiplier    float32
+	DRYBase          float32
+	DRYAllowedLength int
+	DRYPenaltyLastN  int
+
+	// Top-N Sigma sampling
+	TopNSigma float32
 }
 
 type PredictOption func(p *PredictOptions)
@@ -84,6 +91,7 @@ var DefaultOptions PredictOptions = PredictOptions{
 	NKeep:             64,
 	TopK:              40,
 	TopP:              0.95,
+	MinP:              0.05,
 	TailFreeSamplingZ: 1.0,
 	TypicalP:          1.0,
 	Temperature:       0.8,
@@ -95,12 +103,16 @@ var DefaultOptions PredictOptions = PredictOptions{
 	MMap:              true,
 	RopeFreqBase:      10000,
 	RopeFreqScale:     1.0,
-}
-
-func SetMulMatQ(b bool) ModelOption {
-	return func(p *ModelOptions) {
-		p.MulMatQ = &b
-	}
+	// XTC defaults (disabled)
+	XTCProbability: 0.0,
+	XTCThreshold:   0.5,
+	// DRY defaults (disabled)
+	DRYMultiplier:    0.0,
+	DRYBase:          1.75,
+	DRYAllowedLength: 2,
+	DRYPenaltyLastN:  -1,
+	// Top-N Sigma default (disabled)
+	TopNSigma: 0.0,
 }
 
 func SetLoraBase(s string) ModelOption {
@@ -201,21 +213,59 @@ func SetNDraft(nd int) PredictOption {
 	}
 }
 
-func SetPerplexity(b bool) ModelOption {
-	return func(p *ModelOptions) {
-		p.Perplexity = b
+// SetMinP sets the min_p sampling parameter
+func SetMinP(minp float32) PredictOption {
+	return func(p *PredictOptions) {
+		p.MinP = minp
 	}
 }
 
-func SetNegativePromptScale(nps float32) PredictOption {
+// SetXTCProbability sets the XTC sampling probability (0.0 = disabled)
+func SetXTCProbability(prob float32) PredictOption {
 	return func(p *PredictOptions) {
-		p.NegativePromptScale = nps
+		p.XTCProbability = prob
 	}
 }
 
-func SetNegativePrompt(np string) PredictOption {
+// SetXTCThreshold sets the XTC sampling threshold
+func SetXTCThreshold(threshold float32) PredictOption {
 	return func(p *PredictOptions) {
-		p.NegativePrompt = np
+		p.XTCThreshold = threshold
+	}
+}
+
+// SetDRYMultiplier sets the DRY (Don't Repeat Yourself) multiplier (0.0 = disabled)
+func SetDRYMultiplier(multiplier float32) PredictOption {
+	return func(p *PredictOptions) {
+		p.DRYMultiplier = multiplier
+	}
+}
+
+// SetDRYBase sets the DRY base value
+func SetDRYBase(base float32) PredictOption {
+	return func(p *PredictOptions) {
+		p.DRYBase = base
+	}
+}
+
+// SetDRYAllowedLength sets the DRY allowed length
+func SetDRYAllowedLength(length int) PredictOption {
+	return func(p *PredictOptions) {
+		p.DRYAllowedLength = length
+	}
+}
+
+// SetDRYPenaltyLastN sets the DRY penalty last n tokens (-1 = context size)
+func SetDRYPenaltyLastN(n int) PredictOption {
+	return func(p *PredictOptions) {
+		p.DRYPenaltyLastN = n
+	}
+}
+
+// SetTopNSigma sets the top-n sigma sampling parameter (0.0 = disabled)
+func SetTopNSigma(n float32) PredictOption {
+	return func(p *PredictOptions) {
+		p.TopNSigma = n
 	}
 }
 

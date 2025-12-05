@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"strings"
 
-	llama "github.com/go-skynet/go-llama.cpp"
+	llama "github.com/AshkanYarmoradi/go-llama.cpp"
 )
 
 var (
@@ -23,7 +23,7 @@ func main() {
 	var model string
 
 	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-	flags.StringVar(&model, "m", "./models/7B/ggml-model-q4_0.bin", "path to q4_0.bin model file to load")
+	flags.StringVar(&model, "m", "./models/model.gguf", "path to GGUF model file to load")
 	flags.IntVar(&gpulayers, "ngl", 0, "Number of GPU layers to use")
 	flags.IntVar(&threads, "t", runtime.NumCPU(), "number of threads to use during computation")
 	flags.IntVar(&tokens, "n", 512, "number of tokens to predict")

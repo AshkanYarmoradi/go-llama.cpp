@@ -1,4 +1,4 @@
-module github.com/go-skynet/go-llama.cpp
+module github.com/AshkanYarmoradi/go-llama.cpp
 
 go 1.21
 
