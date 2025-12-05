@@ -1,6 +1,6 @@
 <div align="center">
 
-<img width="300" src="./images/logo.png">
+<img width="600" src="./images/logo.png">
 
 # 🦙 go-llama.cpp
 
