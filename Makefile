@@ -36,9 +36,9 @@ endif
 #
 
 BUILD_TYPE?=
-# keep standard at C11 and C++11
-CFLAGS   = -I./llama.cpp -I. -O3 -DNDEBUG -std=c11 -fPIC
-CXXFLAGS = -I./llama.cpp -I. -I./llama.cpp/common -I./common -O3 -DNDEBUG -std=c++11 -fPIC
+# keep standard at C11 and C++17
+CFLAGS   = -I./llama.cpp -I./llama.cpp/include -I./llama.cpp/ggml/include -I. -O3 -DNDEBUG -std=c11 -fPIC
+CXXFLAGS = -I./llama.cpp -I./llama.cpp/include -I./llama.cpp/ggml/include -I. -I./llama.cpp/common -I./common -O3 -DNDEBUG -std=c++17 -fPIC
 LDFLAGS  =
 
 # warnings
@@ -201,50 +201,43 @@ $(info )
 
 # Use this if you want to set the default behavior
 
-llama.cpp/grammar-parser.o: llama.cpp/ggml.o
-	cd build && cp -rf common/CMakeFiles/common.dir/grammar-parser.cpp.o ../llama.cpp/grammar-parser.o
-
-llama.cpp/ggml-alloc.o: llama.cpp/ggml.o
-	cd build && cp -rf CMakeFiles/ggml.dir/ggml-alloc.c.o ../llama.cpp/ggml-alloc.o
-
-llama.cpp/ggml.o: prepare
+# Build llama.cpp via cmake
+build/build_complete:
 	mkdir -p build
-	cd build && CC="$(CC)" CXX="$(CXX)" cmake ../llama.cpp $(CMAKE_ARGS) && VERBOSE=1 cmake --build . --config Release && cp -rf CMakeFiles/ggml.dir/ggml.c.o ../llama.cpp/ggml.o
+	cd build && CC="$(CC)" CXX="$(CXX)" cmake ../llama.cpp $(CMAKE_ARGS) \
+		-DLLAMA_CURL=OFF \
+		-DLLAMA_BUILD_TESTS=OFF \
+		-DLLAMA_BUILD_EXAMPLES=OFF \
+		-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+		-DBUILD_SHARED_LIBS=OFF \
+		-DGGML_OPENMP=ON
+	cd build && VERBOSE=1 cmake --build . --config Release
+	touch build/build_complete
 
-llama.cpp/ggml-cuda.o: llama.cpp/ggml.o
-	cd build && cp -rf "$(GGML_CUDA_OBJ_PATH)" ../llama.cpp/ggml-cuda.o
+binding.o: build/build_complete
+	$(CXX) $(CXXFLAGS) -I./llama.cpp -I./llama.cpp/include -I./llama.cpp/common binding.cpp -o binding.o -c $(LDFLAGS)
 
-llama.cpp/ggml-opencl.o: llama.cpp/ggml.o
-	cd build && cp -rf CMakeFiles/ggml.dir/ggml-opencl.cpp.o ../llama.cpp/ggml-opencl.o
-
-llama.cpp/ggml-metal.o: llama.cpp/ggml.o
-	cd build && cp -rf CMakeFiles/ggml.dir/ggml-metal.m.o ../llama.cpp/ggml-metal.o
-
-llama.cpp/k_quants.o: llama.cpp/ggml.o
-	cd build && cp -rf CMakeFiles/ggml.dir/k_quants.c.o ../llama.cpp/k_quants.o
-
-llama.cpp/llama.o: llama.cpp/ggml.o
-	cd build && cp -rf CMakeFiles/llama.dir/llama.cpp.o ../llama.cpp/llama.o
-
-llama.cpp/common.o: llama.cpp/ggml.o
-	cd build && cp -rf common/CMakeFiles/common.dir/common.cpp.o ../llama.cpp/common.o
-
-binding.o: prepare
-	$(CXX) $(CXXFLAGS) -I./llama.cpp -I./llama.cpp/common binding.cpp -o binding.o -c $(LDFLAGS)
-
-## https://github.com/ggerganov/llama.cpp/pull/1902
-prepare:
-	cd llama.cpp && patch -p1 < ../patches/1902-cuda.patch
-	touch $@
-
-libbinding.a: llama.cpp/ggml.o llama.cpp/k_quants.o llama.cpp/ggml-alloc.o llama.cpp/common.o llama.cpp/grammar-parser.o llama.cpp/llama.o binding.o $(EXTRA_TARGETS)
-	ar src libbinding.a llama.cpp/ggml.o llama.cpp/k_quants.o llama.cpp/ggml-alloc.o llama.cpp/common.o llama.cpp/grammar-parser.o llama.cpp/llama.o binding.o $(EXTRA_TARGETS)
+# Find all object files from cmake build and combine into static library
+# We use a counter to uniquely name files to avoid conflicts when files have the same basename
+libbinding.a: binding.o build/build_complete
+	@echo "Creating static library from cmake build objects..."
+	@mkdir -p obj_temp
+	@counter=0; \
+	for f in $$(find build -name "*.o" -type f); do \
+		counter=$$((counter + 1)); \
+		cp "$$f" "obj_temp/$${counter}_$$(basename $$f)"; \
+	done
+	@cp binding.o obj_temp/
+	ar rcs libbinding.a obj_temp/*.o
+	@rm -rf obj_temp
 
 clean:
 	rm -rf *.o
 	rm -rf *.a
-	$(MAKE) -C llama.cpp clean
 	rm -rf build
+	rm -rf prepare
+	rm -rf obj_temp
+	rm -rf llama.cpp/*.o
 
 ggllm-test-model.bin:
 	wget -q https://huggingface.co/TheBloke/CodeLlama-7B-Instruct-GGUF/resolve/main/codellama-7b-instruct.Q2_K.gguf -O ggllm-test-model.bin

@@ -3,8 +3,8 @@ package llama_test
 import (
 	"os"
 
-	"github.com/go-skynet/go-llama.cpp"
-	. "github.com/go-skynet/go-llama.cpp"
+	"github.com/AshkanYarmoradi/go-llama.cpp"
+	. "github.com/AshkanYarmoradi/go-llama.cpp"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -46,7 +46,7 @@ how much is 2+2?
 			Expect(text).To(ContainSubstring("4"), text)
 		})
 
-		It("speculative sampling predicts", func() {
+		It("predicts with min_p sampling", func() {
 			if testModelPath == "" {
 				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
 			}
@@ -56,23 +56,12 @@ how much is 2+2?
 				SetContext(128),
 				SetMMap(true),
 				SetNBatch(512),
-				SetPerplexity(true),
 			)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(model).ToNot(BeNil())
-			model2, err := New(
-				testModelPath,
-				EnableF16Memory,
-				SetContext(128),
-				SetMMap(true),
-				SetNBatch(512),
-				SetPerplexity(true),
-			)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(model).ToNot(BeNil())
-			text, err := model.SpeculativeSampling(model2, `[INST] Answer to the following question:
+			text, err := model.Predict(`[INST] Answer to the following question:
 how much is 2+2?
-[/INST]`, llama.SetNDraft(16),
+[/INST]`, llama.SetMinP(0.05),
 			)
 			Expect(err).ToNot(HaveOccurred(), text)
 			Expect(text).To(ContainSubstring("4"), text)

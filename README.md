@@ -1,102 +1,337 @@
-# [![Go Reference](https://pkg.go.dev/badge/github.com/go-skynet/go-llama.cpp.svg)](https://pkg.go.dev/github.com/go-skynet/go-llama.cpp) go-llama.cpp
+<div align="center">
 
-[LLama.cpp](https://github.com/ggerganov/llama.cpp) golang bindings.
+<img width="300" src="./images/logo.png">
 
-The go-llama.cpp bindings are high level, as such most of the work is kept into the C/C++ code to avoid any extra computational cost, be more performant and lastly ease out maintenance, while keeping the usage as simple as possible.
+# 🦙 go-llama.cpp
 
-Check out [this](https://about.sourcegraph.com/blog/go/gophercon-2018-adventures-in-cgo-performance) and [this](https://www.cockroachlabs.com/blog/the-cost-and-complexity-of-cgo/) write-ups which summarize the impact of a low-level interface which calls C functions from Go.
+### *Blazing Fast LLM Inference in Go*
 
-If you are looking for an high-level OpenAI compatible API, check out [here](https://github.com/go-skynet/llama-cli).
+[![Go Reference](https://pkg.go.dev/badge/github.com/AshkanYarmoradi/go-llama.cpp.svg)](https://pkg.go.dev/github.com/AshkanYarmoradi/go-llama.cpp)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Go Report Card](https://goreportcard.com/badge/github.com/AshkanYarmoradi/go-llama.cpp)](https://goreportcard.com/report/github.com/AshkanYarmoradi/go-llama.cpp)
 
-## Attention!
+**High-performance [llama.cpp](https://github.com/ggerganov/llama.cpp) bindings for Go — run LLMs locally with the power of C++ and the simplicity of Go.**
 
-Since https://github.com/go-skynet/go-llama.cpp/pull/180 is merged, now go-llama.cpp is not anymore compatible with `ggml` format, but it works ONLY with the new `gguf` file format. See also the upstream PR: https://github.com/ggerganov/llama.cpp/pull/2398.
+[Getting Started](#-quick-start) •
+[Features](#-features) •
+[API Reference](#-api-reference) •
+[GPU Acceleration](#-acceleration) •
+[Examples](#-examples)
 
-If you need to use the `ggml` format, use the https://github.com/go-skynet/go-llama.cpp/releases/tag/pre-gguf tag.
+</div>
 
-## Usage
+---
 
-Note: This repository uses git submodules to keep track of [LLama.cpp](https://github.com/ggerganov/llama.cpp).
+## 🌟 About This Fork
 
-Clone the repository locally:
+> **Note**: The original `go-skynet/go-llama.cpp` repository was unmaintained for over a year. As the llama.cpp ecosystem evolved rapidly with new features, samplers, and breaking API changes, the Go bindings fell behind.
+>
+> **I decided to fork and actively maintain this project** to ensure the Go community has access to the latest llama.cpp capabilities. This fork is fully updated to support the modern llama.cpp API including the new sampler chain architecture and GGUF format.
+
+### What's New in This Fork (December 2025)
+
+- ✅ **Updated to latest llama.cpp** — Full compatibility with modern GGUF models
+- ✅ **New Sampler Chain API** — Modern sampling architecture with composable samplers
+- ✅ **XTC Sampler** — Cross-Token Coherence for improved generation quality
+- ✅ **DRY Sampler** — "Don't Repeat Yourself" penalty to reduce repetition
+- ✅ **TopNSigma Sampler** — Statistical sampling for better token selection
+- ✅ **Model Info API** — Query model metadata (vocab size, layers, parameters, etc.)
+- ✅ **Chat Templates** — Native support for model chat templates
+- ✅ **Fixed Build System** — Proper static linking with all CPU optimizations
+
+---
+
+## 🚀 Features
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  🎯 Performance First                                           │
+│  ────────────────────                                           │
+│  • Zero-copy data passing to C++                                │
+│  • Minimal CGO overhead                                         │
+│  • Native CPU optimizations (AVX, AVX2, AVX-512)               │
+├─────────────────────────────────────────────────────────────────┤
+│  🔧 Flexible Sampling                                           │
+│  ────────────────────                                           │
+│  • Temperature, Top-K, Top-P, Min-P                            │
+│  • Repetition & Presence Penalties                              │
+│  • XTC, DRY, TopNSigma (NEW!)                                  │
+│  • Mirostat v1 & v2                                            │
+├─────────────────────────────────────────────────────────────────┤
+│  ⚡ GPU Acceleration                                            │
+│  ────────────────────                                           │
+│  • NVIDIA CUDA / cuBLAS                                        │
+│  • AMD ROCm / HIPBlas                                          │
+│  • Apple Metal (M1/M2/M3)                                      │
+│  • OpenCL / CLBlast                                            │
+├─────────────────────────────────────────────────────────────────┤
+│  📦 Model Support                                               │
+│  ────────────────────                                           │
+│  • All GGUF quantization formats                               │
+│  • LLaMA, Mistral, Qwen, Phi, and 100+ architectures          │
+│  • LoRA adapter loading                                        │
+│  • Embeddings generation                                       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 📋 Requirements
+
+- Go 1.20+
+- C/C++ compiler (GCC, Clang, or MSVC)
+- CMake 3.14+
+- (Optional) CUDA Toolkit for NVIDIA GPU support
+- (Optional) ROCm for AMD GPU support
+
+---
+
+## 🎯 Quick Start
+
+### Installation
 
 ```bash
-git clone --recurse-submodules https://github.com/go-skynet/go-llama.cpp
-```
-
-To build the bindings locally, run:
-
-```
+# Clone with submodules
+git clone --recurse-submodules https://github.com/AshkanYarmoradi/go-llama.cpp
 cd go-llama.cpp
+
+# Build the bindings
 make libbinding.a
+
+# Run the example
+LIBRARY_PATH=$PWD C_INCLUDE_PATH=$PWD go run ./examples -m "/path/to/model.gguf" -t 8
 ```
 
-Now you can run the example with:
+### Basic Usage
 
-```
-LIBRARY_PATH=$PWD C_INCLUDE_PATH=$PWD go run ./examples -m "/model/path/here" -t 14
+```go
+package main
+
+import (
+    "fmt"
+    llama "github.com/AshkanYarmoradi/go-llama.cpp"
+)
+
+func main() {
+    // Load model
+    model, err := llama.New("model.gguf",
+        llama.SetContext(2048),
+        llama.SetGPULayers(35),
+    )
+    if err != nil {
+        panic(err)
+    }
+    defer model.Free()
+
+    // Generate text
+    response, err := model.Predict("Explain quantum computing in simple terms:",
+        llama.SetTemperature(0.7),
+        llama.SetTopP(0.9),
+        llama.SetTokens(256),
+    )
+    if err != nil {
+        panic(err)
+    }
+    
+    fmt.Println(response)
+}
 ```
 
-## Acceleration
+---
+
+## 🎛️ API Reference
+
+### New Sampler Options
+
+```go
+// XTC (Cross-Token Coherence) - Improves coherence between tokens
+llama.SetXTC(probability, threshold float64)
+
+// DRY (Don't Repeat Yourself) - Reduces repetitive patterns  
+llama.SetDRY(multiplier, base float64, allowedLength, penaltyLastN int)
+
+// TopNSigma - Statistical sampling based on standard deviations
+llama.SetTopNSigma(n float64)
+```
+
+### Model Information API
+
+```go
+// Get comprehensive model metadata
+info := model.GetModelInfo()
+fmt.Printf("Model: %s\n", info.Description)
+fmt.Printf("Vocabulary: %d tokens\n", info.NVocab)
+fmt.Printf("Context Length: %d\n", info.NCtxTrain)
+fmt.Printf("Embedding Dim: %d\n", info.NEmbd)
+fmt.Printf("Layers: %d\n", info.NLayer)
+fmt.Printf("Parameters: %d\n", info.NParams)
+fmt.Printf("Size: %d bytes\n", info.Size)
+
+// Get chat template for chat models
+template := model.GetChatTemplate()
+```
+
+### All Sampling Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `SetTemperature(t)` | Randomness (0.0 = deterministic) | 0.8 |
+| `SetTopK(k)` | Limit to top K tokens | 40 |
+| `SetTopP(p)` | Nucleus sampling threshold | 0.9 |
+| `SetMinP(p)` | Minimum probability threshold | 0.05 |
+| `SetRepeatPenalty(p)` | Penalize repeated tokens | 1.1 |
+| `SetPresencePenalty(p)` | Penalize token presence | 0.0 |
+| `SetFrequencyPenalty(p)` | Penalize token frequency | 0.0 |
+| `SetXTC(prob, thresh)` | Cross-token coherence | disabled |
+| `SetDRY(...)` | Don't Repeat Yourself | disabled |
+| `SetTopNSigma(n)` | Statistical sigma sampling | disabled |
+| `SetMirostat(mode)` | Mirostat sampling (1 or 2) | disabled |
+| `SetMirostatTAU(tau)` | Mirostat target entropy | 5.0 |
+| `SetMirostatETA(eta)` | Mirostat learning rate | 0.1 |
+
+---
+
+## ⚠️ Important Notes
+
+### GGUF Format Only
+
+This library works **exclusively** with the modern `gguf` file format. The legacy `ggml` format is no longer supported.
+
+> Need `ggml` support? Use the legacy tag: [`pre-gguf`](https://github.com/AshkanYarmoradi/go-llama.cpp/releases/tag/pre-gguf)
+
+### Converting Models
+
+```bash
+# Convert HuggingFace models to GGUF
+python llama.cpp/convert_hf_to_gguf.py /path/to/model --outfile model.gguf
+
+# Quantize for smaller size
+./llama.cpp/build/bin/llama-quantize model.gguf model-q4_k_m.gguf Q4_K_M
+```
+
+---
+
+## ⚡ Acceleration
+
+### CPU (Default)
+
+The default build uses optimized CPU code with automatic SIMD detection.
+
+```bash
+make libbinding.a
+LIBRARY_PATH=$PWD C_INCLUDE_PATH=$PWD go run ./examples -m "model.gguf" -t 8
+```
 
 ### OpenBLAS
 
-To build and run with OpenBLAS, for example:
-
-```
+```bash
 BUILD_TYPE=openblas make libbinding.a
-CGO_LDFLAGS="-lopenblas" LIBRARY_PATH=$PWD C_INCLUDE_PATH=$PWD go run -tags openblas ./examples -m "/model/path/here" -t 14
+CGO_LDFLAGS="-lopenblas" LIBRARY_PATH=$PWD C_INCLUDE_PATH=$PWD go run -tags openblas ./examples -m "model.gguf" -t 8
 ```
 
-### CuBLAS
+### 🟢 NVIDIA CUDA
 
-To build with CuBLAS:
-
-```
+```bash
 BUILD_TYPE=cublas make libbinding.a
-CGO_LDFLAGS="-lcublas -lcudart -L/usr/local/cuda/lib64/" LIBRARY_PATH=$PWD C_INCLUDE_PATH=$PWD go run ./examples -m "/model/path/here" -t 14
+CGO_LDFLAGS="-lcublas -lcudart -L/usr/local/cuda/lib64/" \
+  LIBRARY_PATH=$PWD C_INCLUDE_PATH=$PWD go run ./examples -m "model.gguf" -ngl 35
 ```
 
-### ROCM
+### 🔴 AMD ROCm
 
-To build with ROCM (HIPBLAS):
-
-```
+```bash
 BUILD_TYPE=hipblas make libbinding.a
-CC=/opt/rocm/llvm/bin/clang CXX=/opt/rocm/llvm/bin/clang++ CGO_LDFLAGS="-O3 --hip-link --rtlib=compiler-rt -unwindlib=libgcc -lrocblas -lhipblas" LIBRARY_PATH=$PWD C_INCLUDE_PATH=$PWD go run ./examples -m "/model/path/here" -ngl 64 -t 32
+CC=/opt/rocm/llvm/bin/clang CXX=/opt/rocm/llvm/bin/clang++ \
+  CGO_LDFLAGS="-O3 --hip-link --rtlib=compiler-rt -unwindlib=libgcc -lrocblas -lhipblas" \
+  LIBRARY_PATH=$PWD C_INCLUDE_PATH=$PWD go run ./examples -m "model.gguf" -ngl 64
 ```
 
-### OpenCL
+### 🔵 Intel OpenCL
 
-```
-BUILD_TYPE=clblas CLBLAS_DIR=... make libbinding.a
-CGO_LDFLAGS="-lOpenCL -lclblast -L/usr/local/lib64/" LIBRARY_PATH=$PWD C_INCLUDE_PATH=$PWD go run ./examples -m "/model/path/here" -t 14
-```
-
-
-You should see something like this from the output when using the GPU:
-
-```
-ggml_opencl: selecting platform: 'Intel(R) OpenCL HD Graphics'
-ggml_opencl: selecting device: 'Intel(R) Graphics [0x46a6]'
-ggml_opencl: device FP16 support: true
+```bash
+BUILD_TYPE=clblas CLBLAS_DIR=/path/to/clblast make libbinding.a
+CGO_LDFLAGS="-lOpenCL -lclblast -L/usr/local/lib64/" \
+  LIBRARY_PATH=$PWD C_INCLUDE_PATH=$PWD go run ./examples -m "model.gguf"
 ```
 
-## GPU offloading
+### 🍎 Apple Metal (M1/M2/M3)
 
-### Metal (Apple Silicon)
-
-```
+```bash
 BUILD_TYPE=metal make libbinding.a
-CGO_LDFLAGS="-framework Foundation -framework Metal -framework MetalKit -framework MetalPerformanceShaders" LIBRARY_PATH=$PWD C_INCLUDE_PATH=$PWD go build ./examples/main.go
+CGO_LDFLAGS="-framework Foundation -framework Metal -framework MetalKit -framework MetalPerformanceShaders" \
+  LIBRARY_PATH=$PWD C_INCLUDE_PATH=$PWD go build ./examples/main.go
 cp build/bin/ggml-metal.metal .
-./main -m "/model/path/here" -t 1 -ngl 1
+./main -m "model.gguf" -ngl 1
 ```
 
-Enjoy!
+---
 
-The documentation is available [here](https://pkg.go.dev/github.com/go-skynet/go-llama.cpp) and the full example code is [here](https://github.com/go-skynet/go-llama.cpp/blob/master/examples/main.go).
+## 📖 Examples
 
-## License
+### Streaming Output
 
-MIT
+```go
+model.SetTokenCallback(func(token string) bool {
+    fmt.Print(token)
+    return true // continue generation
+})
+
+model.Predict("Write a story about a robot:",
+    llama.SetTokens(500),
+    llama.SetTemperature(0.8),
+)
+```
+
+### Embeddings
+
+```go
+model, _ := llama.New("model.gguf", llama.EnableEmbeddings())
+
+embeddings, _ := model.Embeddings("The quick brown fox")
+fmt.Printf("Vector dimension: %d\n", len(embeddings))
+```
+
+### With LoRA Adapter
+
+```go
+model, _ := llama.New("base-model.gguf",
+    llama.SetLoraAdapter("adapter.bin"),
+    llama.SetLoraBase("base-model.gguf"),
+)
+```
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! This fork is actively maintained and I'm happy to review PRs for:
+
+- Bug fixes
+- Performance improvements  
+- New llama.cpp feature bindings
+- Documentation improvements
+- Test coverage
+
+---
+
+## 📚 Resources
+
+- **[llama.cpp](https://github.com/ggerganov/llama.cpp)** — The C++ inference engine
+- **[GGUF Format](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md)** — Model file format specification
+- **[Hugging Face GGUF Models](https://huggingface.co/models?library=gguf)** — Pre-quantized models
+
+---
+
+## 📄 License
+
+MIT License — see [LICENSE](LICENSE) for details.
+
+---
+
+<div align="center">
+
+**Built with 🦙 by the Go + LLM community**
+
+*If you find this useful, consider giving it a ⭐*
+
+</div>
