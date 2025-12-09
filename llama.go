@@ -1,7 +1,8 @@
 package llama
 
 // #cgo CXXFLAGS: -I${SRCDIR}/llama.cpp/common -I${SRCDIR}/llama.cpp/include -I${SRCDIR}/llama.cpp/ggml/include -I${SRCDIR}/llama.cpp -std=c++17
-// #cgo LDFLAGS: -L${SRCDIR}/ -lbinding -lm -lstdc++ -fopenmp
+// #cgo LDFLAGS: -L${SRCDIR}/ -lbinding -lm -lstdc++
+// #cgo linux LDFLAGS: -fopenmp
 // #cgo darwin LDFLAGS: -framework Accelerate
 // #cgo darwin CXXFLAGS: -std=c++17
 // #include "binding.h"
