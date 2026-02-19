@@ -67,8 +67,25 @@ int get_model_description(void* state_ptr, char* buf, int buf_size);
 int get_model_chat_template(void* state_ptr, const char* name, char* buf, int buf_size);
 
 // Chat template application
-int apply_chat_template(void* state_ptr, const char* tmpl, const char* messages_json, 
+int apply_chat_template(void* state_ptr, const char* tmpl, const char* messages_json,
                         bool add_generation_prompt, char* result, int result_size);
+
+// Special token functions
+int get_vocab_bos(void* state_ptr);
+int get_vocab_eos(void* state_ptr);
+int get_vocab_eot(void* state_ptr);
+int get_vocab_nl(void* state_ptr);
+int get_vocab_sep(void* state_ptr);
+bool get_vocab_add_bos(void* state_ptr);
+bool get_vocab_add_eos(void* state_ptr);
+
+// Model architecture queries
+bool model_has_encoder(void* state_ptr);
+bool model_has_decoder(void* state_ptr);
+bool model_is_recurrent(void* state_ptr);
+
+// System info
+int get_system_info(char* buf, int buf_size);
 
 #ifdef __cplusplus
 }

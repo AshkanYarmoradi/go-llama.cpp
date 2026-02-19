@@ -80,6 +80,65 @@ how much is 2+2?
 			Expect(l).To(BeNumerically(">", 0))
 			Expect(int(l)).To(Equal(len(tokens)))
 		})
+
+		It("returns special tokens", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, _ := getModel()
+			tokens := model.GetSpecialTokens()
+			Expect(tokens.BOS).To(BeNumerically(">=", 0))
+			Expect(tokens.EOS).To(BeNumerically(">=", 0))
+			// BOS and EOS should be different tokens
+			Expect(tokens.BOS).ToNot(Equal(tokens.EOS))
+		})
+
+		It("returns vocab add BOS/EOS flags", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, _ := getModel()
+			// CodeLlama adds BOS automatically
+			addBos := model.GetVocabAddBOS()
+			Expect(addBos).To(BeTrue())
+		})
+
+		It("returns model architecture info", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, _ := getModel()
+			// CodeLlama is a decoder-only transformer
+			Expect(model.ModelHasEncoder()).To(BeFalse())
+			Expect(model.ModelHasDecoder()).To(BeTrue())
+			Expect(model.ModelIsRecurrent()).To(BeFalse())
+		})
+
+		It("returns model info", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, _ := getModel()
+			info := model.GetModelInfo()
+			Expect(info.VocabSize).To(BeNumerically(">", 0))
+			Expect(info.ContextLength).To(BeNumerically(">", 0))
+			Expect(info.EmbeddingSize).To(BeNumerically(">", 0))
+			Expect(info.LayerCount).To(BeNumerically(">", 0))
+			Expect(info.ModelSize).To(BeNumerically(">", 0))
+			Expect(info.ParamCount).To(BeNumerically(">", 0))
+			Expect(info.Description).ToNot(BeEmpty())
+		})
+	})
+
+	Context("System info", func() {
+		It("returns system info string", func() {
+			info := llama.SystemInfo()
+			Expect(info).ToNot(BeEmpty())
+		})
 	})
 
 	Context("Inferencing tests with GPU (using "+testModelPath+") ", Label("gpu"), func() {

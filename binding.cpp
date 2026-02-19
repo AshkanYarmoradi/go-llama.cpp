@@ -657,7 +657,8 @@ void* load_model(const char *fname, int n_ctx, int n_seed, bool memory_f16, bool
     if (lora != nullptr && lora[0] != '\0') {
         llama_adapter_lora * adapter = llama_adapter_lora_init(model, lora);
         if (adapter != nullptr) {
-            llama_set_adapter_lora(ctx, adapter, 1.0f);
+            float scale = 1.0f;
+            llama_set_adapters_lora(ctx, &adapter, 1, &scale);
         } else {
             fprintf(stderr, "%s: warning: failed to load LoRA adapter '%s'\n", __func__, lora);
         }
@@ -723,7 +724,81 @@ int get_model_chat_template(void* state_ptr, const char* name, char* buf, int bu
     return len;
 }
 
-int apply_chat_template(void* state_ptr, const char* tmpl, const char* messages_json, 
+// Special token functions
+int get_vocab_bos(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab * vocab = llama_model_get_vocab(state->model);
+    return llama_vocab_bos(vocab);
+}
+
+int get_vocab_eos(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab * vocab = llama_model_get_vocab(state->model);
+    return llama_vocab_eos(vocab);
+}
+
+int get_vocab_eot(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab * vocab = llama_model_get_vocab(state->model);
+    return llama_vocab_eot(vocab);
+}
+
+int get_vocab_nl(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab * vocab = llama_model_get_vocab(state->model);
+    return llama_vocab_nl(vocab);
+}
+
+int get_vocab_sep(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab * vocab = llama_model_get_vocab(state->model);
+    return llama_vocab_sep(vocab);
+}
+
+bool get_vocab_add_bos(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab * vocab = llama_model_get_vocab(state->model);
+    return llama_vocab_get_add_bos(vocab);
+}
+
+bool get_vocab_add_eos(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab * vocab = llama_model_get_vocab(state->model);
+    return llama_vocab_get_add_eos(vocab);
+}
+
+// Model architecture queries
+bool model_has_encoder(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_model_has_encoder(state->model);
+}
+
+bool model_has_decoder(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_model_has_decoder(state->model);
+}
+
+bool model_is_recurrent(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_model_is_recurrent(state->model);
+}
+
+// System info
+int get_system_info(char* buf, int buf_size) {
+    const char* info = llama_print_system_info();
+    if (info == nullptr) {
+        return 0;
+    }
+    int len = strlen(info);
+    if (len >= buf_size) {
+        len = buf_size - 1;
+    }
+    strncpy(buf, info, len);
+    buf[len] = '\0';
+    return len;
+}
+
+int apply_chat_template(void* state_ptr, const char* tmpl, const char* messages_json,
                         bool add_generation_prompt, char* result, int result_size) {
     // Note: This is a simplified implementation - full implementation would need JSON parsing
     // For now, return -1 to indicate not implemented
