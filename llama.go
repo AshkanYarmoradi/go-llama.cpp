@@ -104,6 +104,61 @@ func cStrLen(b []byte) int {
 	return len(b)
 }
 
+// SpecialTokens contains the special token IDs for the model's vocabulary
+type SpecialTokens struct {
+	BOS int32 // Beginning of sentence
+	EOS int32 // End of sentence
+	EOT int32 // End of turn
+	NL  int32 // Newline
+	SEP int32 // Separator
+}
+
+// GetSpecialTokens returns the special token IDs for the model
+func (l *LLama) GetSpecialTokens() SpecialTokens {
+	return SpecialTokens{
+		BOS: int32(C.get_vocab_bos(l.state)),
+		EOS: int32(C.get_vocab_eos(l.state)),
+		EOT: int32(C.get_vocab_eot(l.state)),
+		NL:  int32(C.get_vocab_nl(l.state)),
+		SEP: int32(C.get_vocab_sep(l.state)),
+	}
+}
+
+// GetVocabAddBOS returns whether the model automatically adds BOS token
+func (l *LLama) GetVocabAddBOS() bool {
+	return bool(C.get_vocab_add_bos(l.state))
+}
+
+// GetVocabAddEOS returns whether the model automatically adds EOS token
+func (l *LLama) GetVocabAddEOS() bool {
+	return bool(C.get_vocab_add_eos(l.state))
+}
+
+// ModelHasEncoder returns whether the model has an encoder component
+func (l *LLama) ModelHasEncoder() bool {
+	return bool(C.model_has_encoder(l.state))
+}
+
+// ModelHasDecoder returns whether the model has a decoder component
+func (l *LLama) ModelHasDecoder() bool {
+	return bool(C.model_has_decoder(l.state))
+}
+
+// ModelIsRecurrent returns whether the model uses a recurrent architecture (e.g., Mamba, RWKV)
+func (l *LLama) ModelIsRecurrent() bool {
+	return bool(C.model_is_recurrent(l.state))
+}
+
+// SystemInfo returns a string with system information relevant to llama.cpp
+func SystemInfo() string {
+	buf := make([]byte, 4096)
+	ret := C.get_system_info((*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)))
+	if ret <= 0 {
+		return ""
+	}
+	return string(buf[:ret])
+}
+
 func (l *LLama) LoadState(state string) error {
 	d := C.CString(state)
 	w := C.CString("rb")
