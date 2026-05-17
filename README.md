@@ -28,7 +28,7 @@
 >
 > **I decided to fork and actively maintain this project** to ensure the Go community has access to the latest llama.cpp capabilities. This fork is fully updated to support the modern llama.cpp API including the new sampler chain architecture and GGUF format.
 
-### What's New in This Fork (December 2025)
+### What's New in This Fork
 
 - ✅ **Updated to latest llama.cpp** — Full compatibility with modern GGUF models
 - ✅ **New Sampler Chain API** — Modern sampling architecture with composable samplers
@@ -38,7 +38,7 @@
 - ✅ **Model Info API** — Query model metadata (vocab size, layers, parameters, etc.)
 - ✅ **Chat Templates** — Native support for model chat templates
 - ✅ **Fixed Build System** — Proper static linking with all CPU optimizations
-
+- ✅ ................
 ---
 
 ## 🚀 Features
