@@ -16,6 +16,17 @@ import (
 	"unsafe"
 )
 
+const (
+	// bytesPerTokenEstimate is a generous upper bound on the UTF-8 length of a
+	// single decoded token, used to size the Predict output buffer.
+	bytesPerTokenEstimate = 8
+
+	// maxPredictBytes caps that buffer so an unbounded token limit does not ask
+	// for a huge allocation. Output beyond it is truncated; use
+	// SetTokenCallback to stream longer generations.
+	maxPredictBytes = 4 * 1024 * 1024
+)
+
 type LLama struct {
 	state       unsafe.Pointer
 	embeddings  bool
@@ -290,7 +301,15 @@ func (l *LLama) Predict(text string, opts ...PredictOption) (string, error) {
 	if po.Tokens == 0 {
 		po.Tokens = 99999999
 	}
-	out := make([]byte, po.Tokens)
+
+	// A token decodes to several bytes, so the output buffer has to be larger
+	// than the token count. The C side truncates to the size we pass, so this
+	// is a hard bound rather than a guess that could overrun.
+	outSize := po.Tokens*bytesPerTokenEstimate + len(text) + 1024
+	if outSize > maxPredictBytes || outSize < 0 {
+		outSize = maxPredictBytes
+	}
+	out := make([]byte, outSize)
 
 	reverseCount := len(po.StopPrompts)
 	reversePrompt := make([]*C.char, reverseCount)
@@ -317,7 +336,7 @@ func (l *LLama) Predict(text string, opts ...PredictOption) (string, error) {
 		C.float(po.DRYMultiplier), C.float(po.DRYBase), C.int(po.DRYAllowedLength), C.int(po.DRYPenaltyLastN),
 		C.float(po.TopNSigma),
 	)
-	ret := C.llama_predict(params, l.state, (*C.char)(unsafe.Pointer(&out[0])), C.bool(po.DebugMode))
+	ret := C.llama_predict(params, l.state, (*C.char)(unsafe.Pointer(&out[0])), C.int(len(out)), C.bool(po.DebugMode))
 	if ret != 0 {
 		return "", fmt.Errorf("inference failed")
 	}
