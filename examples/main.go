@@ -13,10 +13,11 @@ import (
 )
 
 var (
-	threads   = 4
-	tokens    = 128
-	gpulayers = 0
-	seed      = -1
+	threads     = 4
+	tokens      = 512
+	gpulayers   = 0
+	seed        = -1
+	contextSize = 4096
 )
 
 func main() {
@@ -27,6 +28,7 @@ func main() {
 	flags.IntVar(&gpulayers, "ngl", 0, "Number of GPU layers to use")
 	flags.IntVar(&threads, "t", runtime.NumCPU(), "number of threads to use during computation")
 	flags.IntVar(&tokens, "n", 512, "number of tokens to predict")
+	flags.IntVar(&contextSize, "c", 4096, "context size in tokens")
 	flags.IntVar(&seed, "s", -1, "predict RNG seed, -1 for random seed")
 
 	err := flags.Parse(os.Args[1:])
@@ -34,11 +36,21 @@ func main() {
 		fmt.Printf("Parsing program arguments failed: %s", err)
 		os.Exit(1)
 	}
-	l, err := llama.New(model, llama.EnableF16Memory, llama.SetContext(128), llama.EnableEmbeddings, llama.SetGPULayers(gpulayers))
+
+	// The context has to hold the prompt plus everything we generate. Do not
+	// enable embeddings here: an embeddings context returns pooled vectors
+	// instead of token logits, which turns generation into garbage. Load the
+	// model a second time with llama.EnableEmbeddings if you need both.
+	l, err := llama.New(model,
+		llama.SetContext(contextSize),
+		llama.SetGPULayers(gpulayers),
+	)
 	if err != nil {
 		fmt.Println("Loading the model failed:", err.Error())
 		os.Exit(1)
 	}
+	defer l.Free()
+
 	fmt.Printf("Model loaded successfully.\n")
 
 	reader := bufio.NewReader(os.Stdin)
@@ -49,15 +61,11 @@ func main() {
 		_, err := l.Predict(text, llama.Debug, llama.SetTokenCallback(func(token string) bool {
 			fmt.Print(token)
 			return true
-		}), llama.SetTokens(tokens), llama.SetThreads(threads), llama.SetTopK(90), llama.SetTopP(0.86), llama.SetStopWords("llama"), llama.SetSeed(seed))
+		}), llama.SetTokens(tokens), llama.SetThreads(threads), llama.SetTopK(40), llama.SetTopP(0.9), llama.SetTemperature(0.7), llama.SetSeed(seed))
 		if err != nil {
-			panic(err)
+			fmt.Printf("Predicting failed: %s\n", err)
+			os.Exit(1)
 		}
-		embeds, err := l.Embeddings(text)
-		if err != nil {
-			fmt.Printf("Embeddings: error %s \n", err.Error())
-		}
-		fmt.Printf("Embeddings: %v", embeds)
 		fmt.Printf("\n\n")
 	}
 }

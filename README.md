@@ -168,7 +168,8 @@ fmt.Printf("Parameters: %d\n", info.NParams)
 fmt.Printf("Size: %d bytes\n", info.Size)
 
 // Get chat template for chat models
-template := model.GetChatTemplate()
+// Pass "" for the default template, or a name for a specific one
+template := model.GetChatTemplate("")
 ```
 
 ### All Sampling Options
@@ -285,11 +286,16 @@ model.Predict("Write a story about a robot:",
 ### Embeddings
 
 ```go
-model, _ := llama.New("model.gguf", llama.EnableEmbeddings())
+model, _ := llama.New("model.gguf", llama.EnableEmbeddings)
 
 embeddings, _ := model.Embeddings("The quick brown fox")
 fmt.Printf("Vector dimension: %d\n", len(embeddings))
 ```
+
+> **Note:** A model loaded with `EnableEmbeddings` cannot generate text. The context
+> returns pooled embeddings instead of token logits, so `Predict` produces garbage
+> output. If you need both, load the model twice — once with `EnableEmbeddings` and
+> once without.
 
 ### With LoRA Adapter
 

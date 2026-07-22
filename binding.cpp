@@ -7,6 +7,7 @@
 
 #include "binding.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cinttypes>
 #include <cmath>
@@ -146,15 +147,19 @@ int get_embeddings(void* params_ptr, void* state_pr, float * res_embeddings) {
         return 1;
     }
     
+    // Each call embeds its own prompt, so drop the cells left by earlier calls.
+    // Without this the context fills up and llama_decode runs out of slots.
+    llama_memory_seq_rm(llama_get_memory(ctx), -1, -1, -1);
+
     // Create batch
     llama_batch batch = llama_batch_get_one(tokens.data(), tokens.size());
-    
+
     // Decode
     if (llama_decode(ctx, batch) != 0) {
         fprintf(stderr, "%s: failed to decode\n", __func__);
         return 1;
     }
-    
+
     const int n_embd = llama_model_n_embd(model);
     const float * embeddings = llama_get_embeddings(ctx);
     
@@ -186,15 +191,22 @@ int get_token_embeddings(void* params_ptr, void* state_pr, int *tokens, int toke
     return get_embeddings(params_ptr, state_pr, res_embeddings);
 }
 
-int llama_predict(void* params_ptr, void* state_pr, char* result, bool debug) {
+int llama_predict(void* params_ptr, void* state_pr, char* result, int result_size, bool debug) {
     binding_params* params_p = (binding_params*) params_ptr;
     llama_binding_state* state = (llama_binding_state*) state_pr;
     llama_context* ctx = state->ctx;
     llama_model* model = state->model;
     const llama_vocab * vocab = llama_model_get_vocab(model);
-    
+    llama_memory_t mem = llama_get_memory(ctx);
+
     const int n_ctx = llama_n_ctx(ctx);
-    
+
+    // Each prediction starts from a clean cache: n_past below counts from zero,
+    // so cells left over from an earlier call would both desync the position
+    // bookkeeping and fill up the context. Use save_state/load_state to carry
+    // state across calls on purpose.
+    llama_memory_seq_rm(mem, -1, -1, -1);
+
     // Set seed if specified
     if (params_p->seed != LLAMA_DEFAULT_SEED) {
         // Seed is now set during sampler initialization
@@ -306,23 +318,39 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, bool debug) {
     
     std::string res = "";
     std::vector<llama_token> embd;
-    
+
     int n_past = 0;
     int n_remain = params_p->n_predict;
     int n_consumed = 0;
-    
+
+    // Tokens kept in front of the context when it has to be shifted. It can
+    // never exceed the prompt, otherwise the shift would discard tokens that
+    // were never there.
+    const int n_keep = std::min(std::max(params_p->n_keep, 0), (int) embd_inp.size());
+
     bool is_antiprompt = false;
-    
+
     while (n_remain != 0) {
         // Process tokens
         if (!embd.empty()) {
-            // Check context overflow
+            // Context is full: discard the oldest half of the tokens after
+            // n_keep and move the rest down, so the cache has free cells again.
             if (n_past + (int) embd.size() > n_ctx) {
-                const int n_left = n_past - params_p->n_keep;
-                n_past = std::max(1, params_p->n_keep);
-                embd.insert(embd.begin(), embd_inp.begin() + params_p->n_keep, embd_inp.begin() + params_p->n_keep + n_left/2);
+                const int n_discard = (n_past - n_keep) / 2;
+
+                if (n_discard <= 0 || n_keep + (int) embd.size() > n_ctx) {
+                    fprintf(stderr, "%s: error: context too small to shift (n_ctx = %d, n_keep = %d)\n",
+                            __func__, n_ctx, n_keep);
+                    llama_sampler_free(smpl);
+                    return 1;
+                }
+
+                llama_memory_seq_rm (mem, 0, n_keep, n_keep + n_discard);
+                llama_memory_seq_add(mem, 0, n_keep + n_discard, n_past, -n_discard);
+
+                n_past -= n_discard;
             }
-            
+
             // Create batch and decode
             for (int i = 0; i < (int) embd.size(); i += params_p->n_batch) {
                 int n_eval = (int) embd.size() - i;
@@ -398,8 +426,12 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, bool debug) {
     }
     
     llama_sampler_free(smpl);
-    
-    strcpy(result, res.c_str());
+
+    // Bounded copy: a token decodes to several bytes, so `res` is routinely
+    // longer than the caller's token limit. Truncate instead of overrunning.
+    if (result_size > 0) {
+        snprintf(result, (size_t) result_size, "%s", res.c_str());
+    }
     return 0;
 }
 

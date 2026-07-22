@@ -54,7 +54,7 @@ void llama_binding_free_model(void* state);
 
 int llama_tokenize_string(void* params_ptr, void* state_pr, int* result);
 
-int llama_predict(void* params_ptr, void* state_pr, char* result, bool debug);
+int llama_predict(void* params_ptr, void* state_pr, char* result, int result_size, bool debug);
 
 // Model info functions
 int get_model_n_vocab(void* state_ptr);
