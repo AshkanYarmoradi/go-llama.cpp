@@ -210,6 +210,88 @@ func (l *LLama) MemorySeqKeep(seqID int32) {
 	C.memory_seq_keep(l.state, C.int(seqID))
 }
 
+// Sampler is a single sampling stage or a chain of stages, wrapping llama.cpp's
+// sampler API. Construct stages (SamplerTopK, SamplerTemp, ...), add them to a
+// chain from NewSamplerChain, then Sample from a decoded context.
+type Sampler struct {
+	ptr unsafe.Pointer
+}
+
+// NewSamplerChain creates an empty sampler chain. The chain takes ownership of
+// every stage added to it and frees them all when the chain's Free is called.
+func NewSamplerChain() *Sampler { return &Sampler{ptr: C.sampler_chain_init()} }
+
+// Add appends a stage to the chain, transferring ownership of the stage to the
+// chain. Do not call Free on a stage after adding it. A nil or empty stage is
+// ignored (e.g. an invalid grammar).
+func (s *Sampler) Add(stage *Sampler) {
+	if stage == nil || stage.ptr == nil {
+		return
+	}
+	C.sampler_chain_add(s.ptr, stage.ptr)
+}
+
+// Free releases the sampler (and, for a chain, every stage added to it).
+func (s *Sampler) Free() { C.sampler_free(s.ptr) }
+
+// Reset clears any internal sampler state (penalty history, grammar position…).
+func (s *Sampler) Reset() { C.sampler_reset(s.ptr) }
+
+// Accept informs stateful stages that token was chosen.
+func (s *Sampler) Accept(token int32) { C.sampler_accept(s.ptr, C.int(token)) }
+
+// Sample selects a token from the logits of the idx-th output of the last
+// Decode/Predict on model (idx = -1 selects the last token).
+func (s *Sampler) Sample(model *LLama, idx int) int32 {
+	return int32(C.sampler_sample(model.state, s.ptr, C.int(idx)))
+}
+
+// Sampler stages. min_keep floors how many candidates a truncation stage keeps.
+func SamplerGreedy() *Sampler          { return &Sampler{ptr: C.sampler_init_greedy()} }
+func SamplerDist(seed uint32) *Sampler { return &Sampler{ptr: C.sampler_init_dist(C.uint(seed))} }
+func SamplerTopK(k int) *Sampler       { return &Sampler{ptr: C.sampler_init_top_k(C.int(k))} }
+func SamplerTopP(p float32, minKeep int) *Sampler {
+	return &Sampler{ptr: C.sampler_init_top_p(C.float(p), C.int(minKeep))}
+}
+func SamplerMinP(p float32, minKeep int) *Sampler {
+	return &Sampler{ptr: C.sampler_init_min_p(C.float(p), C.int(minKeep))}
+}
+func SamplerTypical(p float32, minKeep int) *Sampler {
+	return &Sampler{ptr: C.sampler_init_typical(C.float(p), C.int(minKeep))}
+}
+func SamplerTemp(t float32) *Sampler { return &Sampler{ptr: C.sampler_init_temp(C.float(t))} }
+func SamplerTempExt(t, delta, exponent float32) *Sampler {
+	return &Sampler{ptr: C.sampler_init_temp_ext(C.float(t), C.float(delta), C.float(exponent))}
+}
+func SamplerXTC(p, t float32, minKeep int, seed uint32) *Sampler {
+	return &Sampler{ptr: C.sampler_init_xtc(C.float(p), C.float(t), C.int(minKeep), C.uint(seed))}
+}
+func SamplerTopNSigma(n float32) *Sampler {
+	return &Sampler{ptr: C.sampler_init_top_n_sigma(C.float(n))}
+}
+func SamplerMirostatV2(seed uint32, tau, eta float32) *Sampler {
+	return &Sampler{ptr: C.sampler_init_mirostat_v2(C.uint(seed), C.float(tau), C.float(eta))}
+}
+func SamplerPenalties(lastN int, repeat, freq, present float32) *Sampler {
+	return &Sampler{ptr: C.sampler_init_penalties(C.int(lastN), C.float(repeat), C.float(freq), C.float(present))}
+}
+
+// SamplerGrammar builds a GBNF grammar-constrained stage from the model's vocab.
+// The returned stage is empty (ignored by Add) if the grammar fails to parse.
+func (l *LLama) SamplerGrammar(grammar, root string) *Sampler {
+	cG := C.CString(grammar)
+	defer C.free(unsafe.Pointer(cG))
+	cR := C.CString(root)
+	defer C.free(unsafe.Pointer(cR))
+	return &Sampler{ptr: C.sampler_init_grammar(l.state, cG, cR)}
+}
+
+// SamplerDRY builds a DRY ("Don't Repeat Yourself") stage from the model's vocab.
+func (l *LLama) SamplerDRY(multiplier, base float32, allowedLength, penaltyLastN int) *Sampler {
+	return &Sampler{ptr: C.sampler_init_dry(l.state, C.float(multiplier), C.float(base),
+		C.int(allowedLength), C.int(penaltyLastN))}
+}
+
 // ModelInfo contains information about the loaded model
 type ModelInfo struct {
 	VocabSize          int
