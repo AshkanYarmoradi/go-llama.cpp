@@ -54,6 +54,19 @@ void llama_binding_free_model(void* state);
 
 int llama_tokenize_string(void* params_ptr, void* state_pr, int* result);
 
+// Direct tokenization helpers that do not require a binding_params struct.
+// tokenize_text returns the token count, or the negative of the required count
+// when max_tokens is too small (matching llama_tokenize). detokenize_text and
+// token_to_piece_str return the bytes written, or the negative of the required
+// size when the buffer is too small (matching llama.cpp).
+int tokenize_text(void* state_ptr, const char* text, int text_len,
+                  int* tokens_out, int max_tokens,
+                  bool add_special, bool parse_special);
+int detokenize_text(void* state_ptr, const int* tokens, int n_tokens,
+                    char* buf, int buf_size,
+                    bool remove_special, bool unparse_special);
+int token_to_piece_str(void* state_ptr, int token, char* buf, int buf_size, bool special);
+
 int llama_predict(void* params_ptr, void* state_pr, char* result, int result_size, bool debug);
 
 // Model info functions

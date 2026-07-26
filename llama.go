@@ -511,6 +511,78 @@ func (l *LLama) TokenizeString(text string, opts ...PredictOption) (int32, []int
 	return gTokRet, goSlice, nil
 }
 
+// Tokenize converts text into token IDs. addSpecial controls whether the
+// model's configured special tokens (such as BOS) are prepended/appended;
+// parseSpecial controls whether special-token markup in the text is parsed into
+// single tokens rather than treated as literal characters. Unlike
+// TokenizeString it is bounds-safe and does not allocate a sampling params
+// struct.
+func (l *LLama) Tokenize(text string, addSpecial, parseSpecial bool) []int32 {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	// A token never spans fewer than one byte, so len(text) plus a small margin
+	// for added special tokens is a safe upper bound on the count. The negative
+	// return path below still handles any underestimate.
+	tokens := make([]int32, len(text)+8)
+	call := func() int {
+		return int(C.tokenize_text(l.state, cText, C.int(len(text)),
+			(*C.int)(unsafe.Pointer(&tokens[0])), C.int(len(tokens)),
+			C.bool(addSpecial), C.bool(parseSpecial)))
+	}
+	n := call()
+	if n < 0 {
+		tokens = make([]int32, -n)
+		if n = call(); n < 0 {
+			return nil
+		}
+	}
+	return tokens[:n]
+}
+
+// Detokenize converts a sequence of token IDs back into text. removeSpecial
+// drops leading BOS-style tokens; unparseSpecial renders special tokens as their
+// text form instead of an empty string.
+func (l *LLama) Detokenize(tokens []int32, removeSpecial, unparseSpecial bool) string {
+	if len(tokens) == 0 {
+		return ""
+	}
+	return growNeg(func(buf []byte) int {
+		return int(C.detokenize_text(l.state,
+			(*C.int)(unsafe.Pointer(&tokens[0])), C.int(len(tokens)),
+			(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)),
+			C.bool(removeSpecial), C.bool(unparseSpecial)))
+	}, len(tokens)*4+16)
+}
+
+// TokenToPiece returns the text fragment a single token decodes to. When
+// special is true, control and special tokens render to their text form.
+func (l *LLama) TokenToPiece(token int32, special bool) string {
+	return growNeg(func(buf []byte) int {
+		return int(C.token_to_piece_str(l.state, C.int(token),
+			(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)), C.bool(special)))
+	}, 64)
+}
+
+// growNeg calls fn with a growing byte buffer following the llama.cpp tokenizer
+// contract: fn returns the number of bytes written, or the negative of the
+// required size when the buffer is too small. initial sizes the first attempt.
+func growNeg(fn func(buf []byte) int, initial int) string {
+	if initial < 1 {
+		initial = 1
+	}
+	buf := make([]byte, initial)
+	n := fn(buf)
+	if n < 0 {
+		buf = make([]byte, -n)
+		n = fn(buf)
+	}
+	if n < 0 {
+		return ""
+	}
+	return string(buf[:n])
+}
+
 // CGo only allows us to use static calls from C to Go, we can't just dynamically pass in func's.
 // This is the next best thing, we register the callbacks in this map and call tokenCallback from
 // the C code. We also attach a finalizer to LLama, so it will unregister the callback when the

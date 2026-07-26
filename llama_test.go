@@ -81,6 +81,28 @@ how much is 2+2?
 			Expect(int(l)).To(Equal(len(tokens)))
 		})
 
+		It("tokenizes and detokenizes round-trip", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, _ := getModel()
+			const text = "The quick brown fox jumps over the lazy dog."
+
+			tokens := model.Tokenize(text, false, false)
+			Expect(tokens).ToNot(BeEmpty())
+			// A token never spans fewer than one byte.
+			Expect(len(tokens)).To(BeNumerically("<=", len(text)+8))
+
+			// Detokenizing reconstructs the text (allowing for tokenizer
+			// normalization at the edges, so assert on a stable inner substring).
+			round := model.Detokenize(tokens, false, false)
+			Expect(round).To(ContainSubstring("quick brown fox"))
+
+			// Each token decodes to a non-empty piece.
+			Expect(model.TokenToPiece(tokens[0], false)).ToNot(BeEmpty())
+		})
+
 		It("returns special tokens", func() {
 			if testModelPath == "" {
 				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
