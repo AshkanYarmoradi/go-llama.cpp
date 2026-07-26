@@ -230,7 +230,18 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, int result_siz
     
     // Initialize sampler chain
     llama_sampler * smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
-    
+
+    // Apply logit bias first so it influences every downstream sampler,
+    // including greedy selection. params_p->logit_bias is populated only when
+    // the caller passes a "token(+|-)value" bias string; previously it was
+    // parsed but never wired into the chain, so the bias was silently ignored.
+    if (!params_p->logit_bias.empty()) {
+        llama_sampler_chain_add(smpl, llama_sampler_init_logit_bias(
+            llama_vocab_n_tokens(vocab),
+            (int32_t) params_p->logit_bias.size(),
+            params_p->logit_bias.data()));
+    }
+
     // Add samplers based on parameters
     if (params_p->temp <= 0) {
         // Greedy sampling

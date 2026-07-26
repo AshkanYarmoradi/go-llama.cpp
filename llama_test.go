@@ -67,6 +67,24 @@ how much is 2+2?
 			Expect(text).To(ContainSubstring("4"), text)
 		})
 
+		It("applies logit bias during generation", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, err := getModel()
+			Expect(err).ToNot(HaveOccurred())
+
+			// A bias string is "token(+|-)value". This exercises the logit-bias
+			// path, which was previously parsed but never added to the sampler
+			// chain; generation must still succeed and produce output.
+			text, err := model.Predict(`[INST] Answer to the following question:
+how much is 2+2?
+[/INST]`, llama.SetLogitBias("5+1.0"))
+			Expect(err).ToNot(HaveOccurred(), text)
+			Expect(text).ToNot(BeEmpty())
+		})
+
 		It("tokenizes strings successfully", func() {
 			if testModelPath == "" {
 				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
