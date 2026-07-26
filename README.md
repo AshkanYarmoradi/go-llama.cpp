@@ -160,16 +160,33 @@ llama.SetTopNSigma(n float64)
 // Get comprehensive model metadata
 info := model.GetModelInfo()
 fmt.Printf("Model: %s\n", info.Description)
-fmt.Printf("Vocabulary: %d tokens\n", info.NVocab)
-fmt.Printf("Context Length: %d\n", info.NCtxTrain)
-fmt.Printf("Embedding Dim: %d\n", info.NEmbd)
-fmt.Printf("Layers: %d\n", info.NLayer)
-fmt.Printf("Parameters: %d\n", info.NParams)
-fmt.Printf("Size: %d bytes\n", info.Size)
+fmt.Printf("Vocabulary: %d tokens\n", info.VocabSize)
+fmt.Printf("Context Length: %d\n", info.ContextLength)
+fmt.Printf("Embedding Dim: %d\n", info.EmbeddingSize)
+fmt.Printf("Layers: %d\n", info.LayerCount)
+fmt.Printf("Attention Heads: %d (KV: %d)\n", info.HeadCount, info.HeadCountKV)
+fmt.Printf("Parameters: %d\n", info.ParamCount)
+fmt.Printf("Size: %d bytes\n", info.ModelSize)
+
+// Read the raw GGUF key-value metadata header
+meta := model.ModelMetadata()
+fmt.Printf("Architecture: %s\n", meta["general.architecture"])
+if name, ok := model.ModelMetadataValue("general.name"); ok {
+    fmt.Printf("Name: %s\n", name)
+}
+
+// Special tokens, including PAD, MASK and fill-in-the-middle
+tokens := model.GetSpecialTokens()
+fmt.Printf("BOS=%d EOS=%d EOT=%d FIMPre=%d\n", tokens.BOS, tokens.EOS, tokens.EOT, tokens.FIMPre)
 
 // Get chat template for chat models
 // Pass "" for the default template, or a name for a specific one
 template := model.GetChatTemplate("")
+
+// Backend capabilities — these need no loaded model
+fmt.Printf("mmap=%v mlock=%v gpuOffload=%v maxDevices=%d\n",
+    llama.SupportsMmap(), llama.SupportsMlock(),
+    llama.SupportsGPUOffload(), llama.MaxDevices())
 ```
 
 ### All Sampling Options
