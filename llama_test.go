@@ -244,6 +244,54 @@ how much is 2+2?
 		})
 	})
 
+	Context("Low-level batching", func() {
+		It("bounds-checks batch capacity", func() {
+			// Batch allocation and the capacity guard need no model.
+			batch := NewBatch(1, 1)
+			defer batch.Free()
+			Expect(batch.Add(1, 0, []int32{0}, false)).To(Succeed())
+			// The second token exceeds capacity 1 and must be rejected.
+			Expect(batch.Add(2, 1, []int32{0}, false)).To(HaveOccurred())
+			Expect(batch.Len()).To(Equal(1))
+		})
+
+		It("decodes a batch and returns next-token logits", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(model).ToNot(BeNil())
+			model.MemoryClear(true)
+
+			tokens := model.Tokenize("The capital of France is", true, false)
+			Expect(tokens).ToNot(BeEmpty())
+
+			batch := NewBatch(len(tokens), 1)
+			defer batch.Free()
+			for i, tok := range tokens {
+				// Request output only for the final token of the sequence.
+				Expect(batch.Add(tok, int32(i), []int32{0}, i == len(tokens)-1)).To(Succeed())
+			}
+			Expect(batch.Len()).To(Equal(len(tokens)))
+			Expect(model.Decode(batch)).To(Equal(0))
+
+			logits := model.Logits(-1)
+			Expect(logits).To(HaveLen(model.GetModelInfo().VocabSize))
+
+			// A real forward pass yields a well-defined, in-range argmax.
+			best, bestIdx := logits[0], 0
+			for i, v := range logits {
+				if v > best {
+					best, bestIdx = v, i
+				}
+			}
+			Expect(bestIdx).To(BeNumerically(">=", 0))
+			Expect(bestIdx).To(BeNumerically("<", model.GetModelInfo().VocabSize))
+		})
+	})
+
 	Context("Inferencing tests with GPU (using "+testModelPath+") ", Label("gpu"), func() {
 		getModel := func() (*LLama, error) {
 			model, err := New(

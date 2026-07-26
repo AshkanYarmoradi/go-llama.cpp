@@ -75,6 +75,25 @@ int token_to_piece_str(void* state_ptr, int token, char* buf, int buf_size, bool
 
 int llama_predict(void* params_ptr, void* state_pr, char* result, int result_size, bool debug);
 
+// Low-level batching, decoding, and output access. batch_init allocates an
+// opaque batch (free with batch_free); batch_add appends tokens; decode_batch /
+// encode_batch run it through the model; get_logits_ith / get_embeddings_ith /
+// get_embeddings_seq copy outputs; the memory_* helpers manage the KV cache.
+void* batch_init(int n_tokens, int n_seq_max);
+void batch_free(void* batch_ptr);
+void batch_clear(void* batch_ptr);
+int batch_n_tokens(void* batch_ptr);
+int batch_add(void* batch_ptr, int token, int pos, const int* seq_ids, int n_seq_ids, bool logits);
+int decode_batch(void* state_ptr, void* batch_ptr);
+int encode_batch(void* state_ptr, void* batch_ptr);
+int get_logits_ith(void* state_ptr, int i, float* out, int out_size);
+int get_embeddings_ith(void* state_ptr, int i, float* out, int out_size);
+int get_embeddings_seq(void* state_ptr, int seq_id, float* out, int out_size);
+void memory_clear(void* state_ptr, bool data);
+bool memory_seq_rm(void* state_ptr, int seq_id, int p0, int p1);
+void memory_seq_cp(void* state_ptr, int src, int dst, int p0, int p1);
+void memory_seq_keep(void* state_ptr, int seq_id);
+
 // Model info functions
 int get_model_n_vocab(void* state_ptr);
 int get_model_n_ctx_train(void* state_ptr);

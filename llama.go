@@ -80,6 +80,136 @@ func (l *LLama) ClearLoRA() {
 	C.clear_lora_adapters(l.state)
 }
 
+// Batch accumulates tokens — each with a position, sequence IDs, and a flag for
+// whether its output is wanted — for a Decode or Encode call. It wraps the
+// engine's llama_batch; call Free when done.
+type Batch struct {
+	ptr      unsafe.Pointer
+	capacity int
+}
+
+// NewBatch allocates a batch holding up to maxTokens tokens, each assignable to
+// up to maxSeq sequences.
+func NewBatch(maxTokens, maxSeq int) *Batch {
+	return &Batch{
+		ptr:      C.batch_init(C.int(maxTokens), C.int(maxSeq)),
+		capacity: maxTokens,
+	}
+}
+
+// Free releases the batch. It must not be used afterwards.
+func (b *Batch) Free() { C.batch_free(b.ptr) }
+
+// Reset empties the batch so it can be refilled without reallocating.
+func (b *Batch) Reset() { C.batch_clear(b.ptr) }
+
+// Len returns the number of tokens currently in the batch.
+func (b *Batch) Len() int { return int(C.batch_n_tokens(b.ptr)) }
+
+// Add appends token at position pos for the given sequence IDs (defaulting to
+// sequence 0 when none are given). Set logits to request the model's output for
+// this token. It returns an error if the batch is full or too many sequence IDs
+// are supplied.
+func (b *Batch) Add(token int32, pos int32, seqIDs []int32, logits bool) error {
+	if len(seqIDs) == 0 {
+		seqIDs = []int32{0}
+	}
+	ret := int(C.batch_add(b.ptr, C.int(token), C.int(pos),
+		(*C.int)(unsafe.Pointer(&seqIDs[0])), C.int(len(seqIDs)), C.bool(logits)))
+	switch ret {
+	case -1:
+		return fmt.Errorf("batch is full (capacity %d)", b.capacity)
+	case -2:
+		return fmt.Errorf("too many sequence IDs for one token (%d)", len(seqIDs))
+	}
+	return nil
+}
+
+// Decode runs the batch through the model using the KV cache. The return value
+// is llama.cpp's decode status: 0 success, 1 = no KV slot (reduce the batch or
+// grow the context), 2 = aborted, negative = error.
+func (l *LLama) Decode(b *Batch) int {
+	return int(C.decode_batch(l.state, b.ptr))
+}
+
+// Encode runs the batch through the encoder of an encoder-decoder model. It
+// returns 0 on success, negative on error.
+func (l *LLama) Encode(b *Batch) int {
+	return int(C.encode_batch(l.state, b.ptr))
+}
+
+// Logits returns the vocabulary logits for the i-th output token of the last
+// decoded batch; i = -1 selects the last token. It returns nil when no logits
+// are available for that index (the token was added without requesting output).
+func (l *LLama) Logits(i int) []float32 {
+	n := int(C.get_model_n_vocab(l.state))
+	if n <= 0 {
+		return nil
+	}
+	out := make([]float32, n)
+	got := int(C.get_logits_ith(l.state, C.int(i),
+		(*C.float)(unsafe.Pointer(&out[0])), C.int(n)))
+	if got <= 0 {
+		return nil
+	}
+	return out[:got]
+}
+
+// TokenEmbedding returns the embedding vector for the i-th output token of the
+// last decoded batch; i = -1 selects the last token. Returns nil if unavailable.
+func (l *LLama) TokenEmbedding(i int) []float32 {
+	return l.embeddingBuf(func(out []float32) int {
+		return int(C.get_embeddings_ith(l.state, C.int(i),
+			(*C.float)(unsafe.Pointer(&out[0])), C.int(len(out))))
+	})
+}
+
+// SequenceEmbedding returns the pooled embedding for an entire sequence (for a
+// context configured with pooled embeddings). Returns nil if unavailable.
+func (l *LLama) SequenceEmbedding(seqID int32) []float32 {
+	return l.embeddingBuf(func(out []float32) int {
+		return int(C.get_embeddings_seq(l.state, C.int(seqID),
+			(*C.float)(unsafe.Pointer(&out[0])), C.int(len(out))))
+	})
+}
+
+func (l *LLama) embeddingBuf(fn func(out []float32) int) []float32 {
+	n := int(C.get_model_n_embd(l.state))
+	if n <= 0 {
+		return nil
+	}
+	out := make([]float32, n)
+	got := fn(out)
+	if got <= 0 {
+		return nil
+	}
+	return out[:got]
+}
+
+// MemoryClear drops the context's KV cache. When clearData is true the
+// underlying data buffers are cleared too, not just the cell metadata.
+func (l *LLama) MemoryClear(clearData bool) {
+	C.memory_clear(l.state, C.bool(clearData))
+}
+
+// MemorySeqRemove removes tokens in [p0, p1) for sequence seqID from the KV
+// cache. Pass p0 < 0 to start at 0 and p1 < 0 to run to the end; seqID < 0
+// matches every sequence. It reports whether the removal succeeded.
+func (l *LLama) MemorySeqRemove(seqID, p0, p1 int32) bool {
+	return bool(C.memory_seq_rm(l.state, C.int(seqID), C.int(p0), C.int(p1)))
+}
+
+// MemorySeqCopy copies tokens in [p0, p1) from sequence src to dst in the KV
+// cache — the shared-prefix trick for parallel sequences.
+func (l *LLama) MemorySeqCopy(src, dst, p0, p1 int32) {
+	C.memory_seq_cp(l.state, C.int(src), C.int(dst), C.int(p0), C.int(p1))
+}
+
+// MemorySeqKeep removes every sequence from the KV cache except seqID.
+func (l *LLama) MemorySeqKeep(seqID int32) {
+	C.memory_seq_keep(l.state, C.int(seqID))
+}
+
 // ModelInfo contains information about the loaded model
 type ModelInfo struct {
 	VocabSize          int

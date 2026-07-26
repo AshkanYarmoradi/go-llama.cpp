@@ -44,6 +44,14 @@ struct llama_binding_state {
     std::vector<float> lora_scales;
 };
 
+// Wrapper around a llama_batch that also remembers its capacity, so batch_add
+// can bounds-check (llama_batch itself only stores the current token count).
+struct binding_batch {
+    llama_batch batch;
+    int32_t capacity;
+    int32_t n_seq_max;
+};
+
 // Parameters structure to pass sampling/generation config
 struct binding_params {
     std::string prompt;
@@ -197,6 +205,142 @@ int get_token_embeddings(void* params_ptr, void* state_pr, int *tokens, int toke
     params_p->prompt = prompt;
     
     return get_embeddings(params_ptr, state_pr, res_embeddings);
+}
+
+// ---------------------------------------------------------------------------
+// Low-level batching, decoding, and output access
+// ---------------------------------------------------------------------------
+
+void* batch_init(int n_tokens, int n_seq_max) {
+    binding_batch* w = new binding_batch;
+    w->batch = llama_batch_init(n_tokens, 0, n_seq_max);
+    w->capacity = n_tokens;
+    w->n_seq_max = n_seq_max;
+    return w;
+}
+
+void batch_free(void* batch_ptr) {
+    binding_batch* w = (binding_batch*) batch_ptr;
+    llama_batch_free(w->batch);
+    delete w;
+}
+
+void batch_clear(void* batch_ptr) {
+    ((binding_batch*) batch_ptr)->batch.n_tokens = 0;
+}
+
+int batch_n_tokens(void* batch_ptr) {
+    return ((binding_batch*) batch_ptr)->batch.n_tokens;
+}
+
+// Append one token at position pos for the given sequence ids, flagging whether
+// its output (logits/embeddings) is wanted. Returns the slot index, -1 if the
+// batch is full, or -2 if n_seq_ids exceeds the batch's configured n_seq_max.
+int batch_add(void* batch_ptr, int token, int pos, const int* seq_ids, int n_seq_ids, bool logits) {
+    binding_batch* w = (binding_batch*) batch_ptr;
+    llama_batch & b = w->batch;
+    if (b.n_tokens >= w->capacity) {
+        return -1;
+    }
+    if (n_seq_ids > w->n_seq_max) {
+        return -2;
+    }
+    const int idx = b.n_tokens;
+    b.token[idx]    = token;
+    b.pos[idx]      = pos;
+    b.n_seq_id[idx] = n_seq_ids;
+    for (int k = 0; k < n_seq_ids; k++) {
+        b.seq_id[idx][k] = seq_ids[k];
+    }
+    b.logits[idx] = logits ? 1 : 0;
+    b.n_tokens++;
+    return idx;
+}
+
+// Decode a batch using the KV cache. Returns llama_decode's status: 0 success,
+// 1 = no KV slot, 2 = aborted, negative = error.
+int decode_batch(void* state_ptr, void* batch_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_decode(state->ctx, ((binding_batch*) batch_ptr)->batch);
+}
+
+// Encode a batch (encoder-decoder models). Returns 0 on success, negative on error.
+int encode_batch(void* state_ptr, void* batch_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_encode(state->ctx, ((binding_batch*) batch_ptr)->batch);
+}
+
+// Copy up to out_size logits for the i-th output token (-1 = last) into out.
+// Returns the number copied, or 0 if unavailable.
+int get_logits_ith(void* state_ptr, int i, float* out, int out_size) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const float* logits = llama_get_logits_ith(state->ctx, i);
+    if (logits == nullptr) {
+        return 0;
+    }
+    int n = llama_vocab_n_tokens(llama_model_get_vocab(state->model));
+    if (n > out_size) {
+        n = out_size;
+    }
+    for (int k = 0; k < n; k++) {
+        out[k] = logits[k];
+    }
+    return n;
+}
+
+// Copy up to out_size embeddings for the i-th output token (-1 = last) into out.
+int get_embeddings_ith(void* state_ptr, int i, float* out, int out_size) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const float* emb = llama_get_embeddings_ith(state->ctx, i);
+    if (emb == nullptr) {
+        return 0;
+    }
+    int n = llama_model_n_embd(state->model);
+    if (n > out_size) {
+        n = out_size;
+    }
+    for (int k = 0; k < n; k++) {
+        out[k] = emb[k];
+    }
+    return n;
+}
+
+// Copy up to out_size pooled embeddings for an entire sequence into out.
+int get_embeddings_seq(void* state_ptr, int seq_id, float* out, int out_size) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const float* emb = llama_get_embeddings_seq(state->ctx, seq_id);
+    if (emb == nullptr) {
+        return 0;
+    }
+    int n = llama_model_n_embd(state->model);
+    if (n > out_size) {
+        n = out_size;
+    }
+    for (int k = 0; k < n; k++) {
+        out[k] = emb[k];
+    }
+    return n;
+}
+
+// KV-cache / sequence management on the context memory.
+void memory_clear(void* state_ptr, bool data) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    llama_memory_clear(llama_get_memory(state->ctx), data);
+}
+
+bool memory_seq_rm(void* state_ptr, int seq_id, int p0, int p1) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_memory_seq_rm(llama_get_memory(state->ctx), seq_id, p0, p1);
+}
+
+void memory_seq_cp(void* state_ptr, int src, int dst, int p0, int p1) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    llama_memory_seq_cp(llama_get_memory(state->ctx), src, dst, p0, p1);
+}
+
+void memory_seq_keep(void* state_ptr, int seq_id) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    llama_memory_seq_keep(llama_get_memory(state->ctx), seq_id);
 }
 
 int llama_predict(void* params_ptr, void* state_pr, char* result, int result_size, bool debug) {
