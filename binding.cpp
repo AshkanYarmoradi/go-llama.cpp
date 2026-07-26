@@ -24,8 +24,12 @@
 #include <signal.h>
 #include <unistd.h>
 #elif defined (_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #include <signal.h>
 #endif
@@ -207,11 +211,9 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, int result_siz
     // state across calls on purpose.
     llama_memory_seq_rm(mem, -1, -1, -1);
 
-    // Set seed if specified
-    if (params_p->seed != LLAMA_DEFAULT_SEED) {
-        // Seed is now set during sampler initialization
-    }
-    
+    // Note: the RNG seed is applied when the sampler chain is built below
+    // (llama_sampler_init_dist / mirostat), not on the context.
+
     // Tokenize prompt
     bool add_bos = llama_vocab_get_add_bos(vocab);
     std::vector<llama_token> embd_inp = tokenize_prompt(vocab, params_p->prompt, add_bos);
@@ -382,7 +384,7 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, int result_siz
             
             // Get token string and callback
             std::string token_str = token_to_piece(vocab, id);
-            if (!tokenCallback(state_pr, (char*)token_str.c_str())) {
+            if (!tokenCallback(state_pr, &token_str[0])) {
                 break;
             }
             
@@ -621,7 +623,16 @@ void* load_model(const char *fname, int n_ctx, int n_seed, bool memory_f16, bool
                  bool embeddings, bool mmap, bool low_vram, int n_gpu_layers, int n_batch, 
                  const char *maingpu, const char *tensorsplit, bool numa, float rope_freq_base, 
                  float rope_freq_scale, const char *lora, const char *lora_base) {
-    
+
+    // These parameters are retained for C ABI stability with the Go layer but
+    // are no longer consumed by llama.cpp: the seed is applied when the sampler
+    // chain is built, KV-cache precision is chosen via the context params, and
+    // low_vram / lora_base were removed from the upstream API.
+    (void) n_seed;
+    (void) memory_f16;
+    (void) low_vram;
+    (void) lora_base;
+
     fprintf(stderr, "%s: loading model from '%s'\n", __func__, fname);
     
     // Initialize backend
@@ -634,8 +645,13 @@ void* load_model(const char *fname, int n_ctx, int n_seed, bool memory_f16, bool
     // Setup model parameters
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = n_gpu_layers;
-    model_params.use_mmap = mmap;
-    model_params.use_mlock = mlock;
+    // llama.cpp replaced the use_mmap/use_mlock booleans with a single
+    // load_mode enum. Preserve the binding's semantics: mlock implies mmap
+    // (LLAMA_LOAD_MODE_MLOCK == "mmap + keep resident"), a plain mmap request
+    // maps to LLAMA_LOAD_MODE_MMAP, and neither maps to LLAMA_LOAD_MODE_NONE.
+    model_params.load_mode = mlock ? LLAMA_LOAD_MODE_MLOCK
+                           : mmap  ? LLAMA_LOAD_MODE_MMAP
+                                   : LLAMA_LOAD_MODE_NONE;
     
     // Parse main GPU
     if (maingpu != nullptr && maingpu[0] != '\0') {
