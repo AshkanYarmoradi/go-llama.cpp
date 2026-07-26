@@ -465,8 +465,32 @@ int llama_tokenize_string(void* params_ptr, void* state_pr, int* result) {
     for (size_t i = 0; i < tokens.size(); i++) {
         result[i] = tokens[i];
     }
-    
+
     return (int)tokens.size();
+}
+
+int tokenize_text(void* state_ptr, const char* text, int text_len,
+                  int* tokens_out, int max_tokens,
+                  bool add_special, bool parse_special) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab * vocab = llama_model_get_vocab(state->model);
+    return llama_tokenize(vocab, text, text_len, (llama_token*) tokens_out,
+                          max_tokens, add_special, parse_special);
+}
+
+int detokenize_text(void* state_ptr, const int* tokens, int n_tokens,
+                    char* buf, int buf_size,
+                    bool remove_special, bool unparse_special) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab * vocab = llama_model_get_vocab(state->model);
+    return llama_detokenize(vocab, (const llama_token*) tokens, n_tokens, buf,
+                            buf_size, remove_special, unparse_special);
+}
+
+int token_to_piece_str(void* state_ptr, int token, char* buf, int buf_size, bool special) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab * vocab = llama_model_get_vocab(state->model);
+    return llama_token_to_piece(vocab, token, buf, buf_size, 0, special);
 }
 
 std::vector<std::string> create_vector(const char** strings, int count) {
