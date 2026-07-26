@@ -52,6 +52,12 @@ void llama_free_params(void* params_ptr);
 
 void llama_binding_free_model(void* state);
 
+// LoRA adapters. apply_lora_adapter loads an adapter and adds it to the set
+// active on the context (returns 0 on success). clear_lora_adapters detaches
+// and frees every adapter previously applied this way.
+int apply_lora_adapter(void* state_ptr, const char* path, float scale);
+int clear_lora_adapters(void* state_ptr);
+
 int llama_tokenize_string(void* params_ptr, void* state_pr, int* result);
 
 // Direct tokenization helpers that do not require a binding_params struct.

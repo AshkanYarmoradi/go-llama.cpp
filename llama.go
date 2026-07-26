@@ -62,6 +62,24 @@ func (l *LLama) Free() {
 	C.llama_binding_free_model(l.state)
 }
 
+// ApplyLoRA loads a LoRA adapter from path and applies it to the context with
+// the given scale. Adapters stack: each call adds to the active set. Adapters
+// applied this way are released by ClearLoRA or when the model is freed.
+func (l *LLama) ApplyLoRA(path string, scale float32) error {
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+	if C.apply_lora_adapter(l.state, cPath, C.float(scale)) != 0 {
+		return fmt.Errorf("failed to apply LoRA adapter %q", path)
+	}
+	return nil
+}
+
+// ClearLoRA detaches and frees every LoRA adapter previously applied with
+// ApplyLoRA, returning the context to the base model weights.
+func (l *LLama) ClearLoRA() {
+	C.clear_lora_adapters(l.state)
+}
+
 // ModelInfo contains information about the loaded model
 type ModelInfo struct {
 	VocabSize          int
