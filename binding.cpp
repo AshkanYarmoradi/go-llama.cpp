@@ -772,6 +772,48 @@ int get_model_chat_template(void* state_ptr, const char* name, char* buf, int bu
     return len;
 }
 
+// Extended model geometry
+int get_model_n_head(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_model_n_head(state->model);
+}
+
+int get_model_n_head_kv(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_model_n_head_kv(state->model);
+}
+
+int get_model_n_swa(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_model_n_swa(state->model);
+}
+
+float get_model_rope_freq_scale_train(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_model_rope_freq_scale_train(state->model);
+}
+
+// Model metadata (GGUF key-value header)
+int get_model_meta_count(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_model_meta_count(state->model);
+}
+
+int get_model_meta_val_str(void* state_ptr, const char* key, char* buf, int buf_size) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_model_meta_val_str(state->model, key, buf, (size_t) buf_size);
+}
+
+int get_model_meta_key_by_index(void* state_ptr, int i, char* buf, int buf_size) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_model_meta_key_by_index(state->model, i, buf, (size_t) buf_size);
+}
+
+int get_model_meta_val_str_by_index(void* state_ptr, int i, char* buf, int buf_size) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_model_meta_val_str_by_index(state->model, i, buf, (size_t) buf_size);
+}
+
 // Special token functions
 int get_vocab_bos(void* state_ptr) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
@@ -815,6 +857,47 @@ bool get_vocab_add_eos(void* state_ptr) {
     return llama_vocab_get_add_eos(vocab);
 }
 
+// Extended special tokens (padding, mask, fill-in-the-middle)
+int get_vocab_pad(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_vocab_pad(llama_model_get_vocab(state->model));
+}
+
+int get_vocab_mask(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_vocab_mask(llama_model_get_vocab(state->model));
+}
+
+int get_vocab_fim_pre(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_vocab_fim_pre(llama_model_get_vocab(state->model));
+}
+
+int get_vocab_fim_suf(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_vocab_fim_suf(llama_model_get_vocab(state->model));
+}
+
+int get_vocab_fim_mid(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_vocab_fim_mid(llama_model_get_vocab(state->model));
+}
+
+int get_vocab_fim_pad(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_vocab_fim_pad(llama_model_get_vocab(state->model));
+}
+
+int get_vocab_fim_rep(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_vocab_fim_rep(llama_model_get_vocab(state->model));
+}
+
+int get_vocab_fim_sep(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_vocab_fim_sep(llama_model_get_vocab(state->model));
+}
+
 // Model architecture queries
 bool model_has_encoder(void* state_ptr) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
@@ -845,6 +928,14 @@ int get_system_info(char* buf, int buf_size) {
     buf[len] = '\0';
     return len;
 }
+
+// Backend capability queries (no model required)
+bool backend_supports_mmap(void)          { return llama_supports_mmap(); }
+bool backend_supports_mlock(void)         { return llama_supports_mlock(); }
+bool backend_supports_gpu_offload(void)   { return llama_supports_gpu_offload(); }
+bool backend_supports_rpc(void)           { return llama_supports_rpc(); }
+int  backend_max_devices(void)            { return (int) llama_max_devices(); }
+int  backend_max_parallel_sequences(void) { return (int) llama_max_parallel_sequences(); }
 
 int apply_chat_template(void* state_ptr, const char* tmpl, const char* messages_json,
                         bool add_generation_prompt, char* result, int result_size) {

@@ -132,12 +132,60 @@ how much is 2+2?
 			Expect(info.ParamCount).To(BeNumerically(">", 0))
 			Expect(info.Description).ToNot(BeEmpty())
 		})
+
+		It("exposes extended model geometry", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, _ := getModel()
+			info := model.GetModelInfo()
+			Expect(info.HeadCount).To(BeNumerically(">", 0))
+			Expect(info.HeadCountKV).To(BeNumerically(">", 0))
+			// Attention heads are shared (MHA/GQA/MQA): KV heads never exceed query heads.
+			Expect(info.HeadCountKV).To(BeNumerically("<=", info.HeadCount))
+			Expect(info.RopeFreqScaleTrain).To(BeNumerically(">", 0))
+			Expect(info.SlidingWindow).To(BeNumerically(">=", 0))
+		})
+
+		It("exposes model metadata", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, _ := getModel()
+			meta := model.ModelMetadata()
+			Expect(meta).ToNot(BeEmpty())
+			Expect(meta).To(HaveKey("general.architecture"))
+
+			arch, ok := model.ModelMetadataValue("general.architecture")
+			Expect(ok).To(BeTrue())
+			Expect(arch).ToNot(BeEmpty())
+			Expect(arch).To(Equal(meta["general.architecture"]))
+
+			_, ok = model.ModelMetadataValue("this.key.does.not.exist")
+			Expect(ok).To(BeFalse())
+		})
 	})
 
 	Context("System info", func() {
 		It("returns system info string", func() {
 			info := llama.SystemInfo()
 			Expect(info).ToNot(BeEmpty())
+		})
+	})
+
+	Context("Backend capabilities", func() {
+		It("reports capability flags without a loaded model", func() {
+			// These reflect compiled-in backend features and must not require a model.
+			Expect(llama.MaxParallelSequences()).To(BeNumerically(">=", 1))
+			Expect(llama.MaxDevices()).To(BeNumerically(">=", 0))
+			// mmap is available on every platform in the CI matrix.
+			Expect(llama.SupportsMmap()).To(BeTrue())
+			// The remaining queries must at least execute without panicking.
+			_ = llama.SupportsMlock()
+			_ = llama.SupportsGPUOffload()
+			_ = llama.SupportsRPC()
 		})
 	})
 

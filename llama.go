@@ -64,13 +64,17 @@ func (l *LLama) Free() {
 
 // ModelInfo contains information about the loaded model
 type ModelInfo struct {
-	VocabSize     int
-	ContextLength int
-	EmbeddingSize int
-	LayerCount    int
-	ModelSize     int64
-	ParamCount    int64
-	Description   string
+	VocabSize          int
+	ContextLength      int
+	EmbeddingSize      int
+	LayerCount         int
+	HeadCount          int
+	HeadCountKV        int
+	SlidingWindow      int // n_swa; 0 when the model does not use sliding-window attention
+	RopeFreqScaleTrain float32
+	ModelSize          int64
+	ParamCount         int64
+	Description        string
 }
 
 // GetModelInfo returns information about the loaded model
@@ -79,14 +83,73 @@ func (l *LLama) GetModelInfo() ModelInfo {
 	C.get_model_description(l.state, (*C.char)(unsafe.Pointer(&descBuf[0])), C.int(len(descBuf)))
 
 	return ModelInfo{
-		VocabSize:     int(C.get_model_n_vocab(l.state)),
-		ContextLength: int(C.get_model_n_ctx_train(l.state)),
-		EmbeddingSize: int(C.get_model_n_embd(l.state)),
-		LayerCount:    int(C.get_model_n_layer(l.state)),
-		ModelSize:     int64(C.get_model_size(l.state)),
-		ParamCount:    int64(C.get_model_n_params(l.state)),
-		Description:   string(descBuf[:cStrLen(descBuf)]),
+		VocabSize:          int(C.get_model_n_vocab(l.state)),
+		ContextLength:      int(C.get_model_n_ctx_train(l.state)),
+		EmbeddingSize:      int(C.get_model_n_embd(l.state)),
+		LayerCount:         int(C.get_model_n_layer(l.state)),
+		HeadCount:          int(C.get_model_n_head(l.state)),
+		HeadCountKV:        int(C.get_model_n_head_kv(l.state)),
+		SlidingWindow:      int(C.get_model_n_swa(l.state)),
+		RopeFreqScaleTrain: float32(C.get_model_rope_freq_scale_train(l.state)),
+		ModelSize:          int64(C.get_model_size(l.state)),
+		ParamCount:         int64(C.get_model_n_params(l.state)),
+		Description:        string(descBuf[:cStrLen(descBuf)]),
 	}
+}
+
+// ModelMetadata returns every key-value entry stored in the GGUF model header
+// (architecture, tokenizer settings, quantization, and so on).
+func (l *LLama) ModelMetadata() map[string]string {
+	n := int(C.get_model_meta_count(l.state))
+	meta := make(map[string]string, n)
+	for i := 0; i < n; i++ {
+		key, ok := grow(func(buf []byte) int {
+			return int(C.get_model_meta_key_by_index(l.state, C.int(i),
+				(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+		})
+		if !ok {
+			continue
+		}
+		val, ok := grow(func(buf []byte) int {
+			return int(C.get_model_meta_val_str_by_index(l.state, C.int(i),
+				(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+		})
+		if !ok {
+			continue
+		}
+		meta[key] = val
+	}
+	return meta
+}
+
+// ModelMetadataValue returns the metadata value for a single key. The boolean
+// is false when the key is not present in the model header.
+func (l *LLama) ModelMetadataValue(key string) (string, bool) {
+	cKey := C.CString(key)
+	defer C.free(unsafe.Pointer(cKey))
+	return grow(func(buf []byte) int {
+		return int(C.get_model_meta_val_str(l.state, cKey,
+			(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+	})
+}
+
+// grow calls fn with an increasingly large buffer until the written value fits.
+// It follows the snprintf contract used by the llama.cpp string accessors: fn
+// returns the length that would be written (a value >= len(buf) means the
+// output was truncated), or a negative value when the entry is absent.
+func grow(fn func(buf []byte) int) (string, bool) {
+	buf := make([]byte, 512)
+	n := fn(buf)
+	if n < 0 {
+		return "", false
+	}
+	if n >= len(buf) {
+		buf = make([]byte, n+1)
+		if n = fn(buf); n < 0 {
+			return "", false
+		}
+	}
+	return string(buf[:n]), true
 }
 
 // GetChatTemplate returns the chat template for the model
@@ -115,23 +178,40 @@ func cStrLen(b []byte) int {
 	return len(b)
 }
 
-// SpecialTokens contains the special token IDs for the model's vocabulary
+// SpecialTokens contains the special token IDs for the model's vocabulary.
+// A field is -1 (LLAMA_TOKEN_NULL) when the vocabulary does not define it.
 type SpecialTokens struct {
-	BOS int32 // Beginning of sentence
-	EOS int32 // End of sentence
-	EOT int32 // End of turn
-	NL  int32 // Newline
-	SEP int32 // Separator
+	BOS    int32 // Beginning of sentence
+	EOS    int32 // End of sentence
+	EOT    int32 // End of turn
+	NL     int32 // Newline
+	SEP    int32 // Separator
+	PAD    int32 // Padding
+	MASK   int32 // Mask
+	FIMPre int32 // Fill-in-the-middle prefix
+	FIMSuf int32 // Fill-in-the-middle suffix
+	FIMMid int32 // Fill-in-the-middle middle
+	FIMPad int32 // Fill-in-the-middle padding
+	FIMRep int32 // Fill-in-the-middle repository separator
+	FIMSep int32 // Fill-in-the-middle separator
 }
 
 // GetSpecialTokens returns the special token IDs for the model
 func (l *LLama) GetSpecialTokens() SpecialTokens {
 	return SpecialTokens{
-		BOS: int32(C.get_vocab_bos(l.state)),
-		EOS: int32(C.get_vocab_eos(l.state)),
-		EOT: int32(C.get_vocab_eot(l.state)),
-		NL:  int32(C.get_vocab_nl(l.state)),
-		SEP: int32(C.get_vocab_sep(l.state)),
+		BOS:    int32(C.get_vocab_bos(l.state)),
+		EOS:    int32(C.get_vocab_eos(l.state)),
+		EOT:    int32(C.get_vocab_eot(l.state)),
+		NL:     int32(C.get_vocab_nl(l.state)),
+		SEP:    int32(C.get_vocab_sep(l.state)),
+		PAD:    int32(C.get_vocab_pad(l.state)),
+		MASK:   int32(C.get_vocab_mask(l.state)),
+		FIMPre: int32(C.get_vocab_fim_pre(l.state)),
+		FIMSuf: int32(C.get_vocab_fim_suf(l.state)),
+		FIMMid: int32(C.get_vocab_fim_mid(l.state)),
+		FIMPad: int32(C.get_vocab_fim_pad(l.state)),
+		FIMRep: int32(C.get_vocab_fim_rep(l.state)),
+		FIMSep: int32(C.get_vocab_fim_sep(l.state)),
 	}
 }
 
@@ -144,6 +224,28 @@ func (l *LLama) GetVocabAddBOS() bool {
 func (l *LLama) GetVocabAddEOS() bool {
 	return bool(C.get_vocab_add_eos(l.state))
 }
+
+// Backend capability queries. They reflect how the underlying llama.cpp library
+// was compiled and can be called without a loaded model.
+
+// SupportsMmap reports whether memory-mapped model loading is available.
+func SupportsMmap() bool { return bool(C.backend_supports_mmap()) }
+
+// SupportsMlock reports whether locking the model into RAM is available.
+func SupportsMlock() bool { return bool(C.backend_supports_mlock()) }
+
+// SupportsGPUOffload reports whether offloading layers to a GPU is available.
+func SupportsGPUOffload() bool { return bool(C.backend_supports_gpu_offload()) }
+
+// SupportsRPC reports whether the RPC backend is available.
+func SupportsRPC() bool { return bool(C.backend_supports_rpc()) }
+
+// MaxDevices returns the maximum number of devices the backend can address.
+func MaxDevices() int { return int(C.backend_max_devices()) }
+
+// MaxParallelSequences returns the maximum number of sequences that can be
+// decoded in parallel.
+func MaxParallelSequences() int { return int(C.backend_max_parallel_sequences()) }
 
 // ModelHasEncoder returns whether the model has an encoder component
 func (l *LLama) ModelHasEncoder() bool {

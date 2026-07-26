@@ -66,6 +66,20 @@ long long get_model_n_params(void* state_ptr);
 int get_model_description(void* state_ptr, char* buf, int buf_size);
 int get_model_chat_template(void* state_ptr, const char* name, char* buf, int buf_size);
 
+// Extended model geometry
+int get_model_n_head(void* state_ptr);
+int get_model_n_head_kv(void* state_ptr);
+int get_model_n_swa(void* state_ptr);
+float get_model_rope_freq_scale_train(void* state_ptr);
+
+// Model metadata (GGUF key-value header). The *_str functions follow snprintf
+// semantics: they return the length that would be written (>= buf_size means
+// the value was truncated), or -1 if the key/index is absent.
+int get_model_meta_count(void* state_ptr);
+int get_model_meta_val_str(void* state_ptr, const char* key, char* buf, int buf_size);
+int get_model_meta_key_by_index(void* state_ptr, int i, char* buf, int buf_size);
+int get_model_meta_val_str_by_index(void* state_ptr, int i, char* buf, int buf_size);
+
 // Chat template application
 int apply_chat_template(void* state_ptr, const char* tmpl, const char* messages_json,
                         bool add_generation_prompt, char* result, int result_size);
@@ -79,6 +93,17 @@ int get_vocab_sep(void* state_ptr);
 bool get_vocab_add_bos(void* state_ptr);
 bool get_vocab_add_eos(void* state_ptr);
 
+// Extended special tokens (padding, mask, and fill-in-the-middle). Return -1
+// (LLAMA_TOKEN_NULL) when the model's vocabulary does not define the token.
+int get_vocab_pad(void* state_ptr);
+int get_vocab_mask(void* state_ptr);
+int get_vocab_fim_pre(void* state_ptr);
+int get_vocab_fim_suf(void* state_ptr);
+int get_vocab_fim_mid(void* state_ptr);
+int get_vocab_fim_pad(void* state_ptr);
+int get_vocab_fim_rep(void* state_ptr);
+int get_vocab_fim_sep(void* state_ptr);
+
 // Model architecture queries
 bool model_has_encoder(void* state_ptr);
 bool model_has_decoder(void* state_ptr);
@@ -86,6 +111,15 @@ bool model_is_recurrent(void* state_ptr);
 
 // System info
 int get_system_info(char* buf, int buf_size);
+
+// Backend capability queries. These reflect how the llama.cpp library was
+// compiled and require no loaded model.
+bool backend_supports_mmap(void);
+bool backend_supports_mlock(void);
+bool backend_supports_gpu_offload(void);
+bool backend_supports_rpc(void);
+int backend_max_devices(void);
+int backend_max_parallel_sequences(void);
 
 #ifdef __cplusplus
 }
