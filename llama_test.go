@@ -292,6 +292,34 @@ how much is 2+2?
 		})
 	})
 
+	Context("Composable samplers", func() {
+		It("builds a chain and samples a valid token", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(model).ToNot(BeNil())
+
+			// Predict once so the context holds real logits to sample from.
+			_, err = model.Predict("The capital of France is")
+			Expect(err).ToNot(HaveOccurred())
+
+			chain := NewSamplerChain()
+			defer chain.Free()
+			chain.Add(SamplerTopK(40))
+			chain.Add(SamplerTopP(0.95, 1))
+			chain.Add(SamplerTemp(0.8))
+			chain.Add(SamplerDist(1234))
+
+			tok := chain.Sample(model, -1)
+			Expect(tok).To(BeNumerically(">=", 0))
+			Expect(tok).To(BeNumerically("<", int32(model.GetModelInfo().VocabSize)))
+			chain.Accept(tok)
+		})
+	})
+
 	Context("Inferencing tests with GPU (using "+testModelPath+") ", Label("gpu"), func() {
 		getModel := func() (*LLama, error) {
 			model, err := New(

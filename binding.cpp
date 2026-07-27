@@ -1156,6 +1156,62 @@ bool backend_supports_rpc(void)           { return llama_supports_rpc(); }
 int  backend_max_devices(void)            { return (int) llama_max_devices(); }
 int  backend_max_parallel_sequences(void) { return (int) llama_max_parallel_sequences(); }
 
+// ---------------------------------------------------------------------------
+// Composable samplers
+// ---------------------------------------------------------------------------
+
+void* sampler_chain_init(void) {
+    return llama_sampler_chain_init(llama_sampler_chain_default_params());
+}
+
+void sampler_chain_add(void* chain, void* smpl) {
+    llama_sampler_chain_add((llama_sampler*) chain, (llama_sampler*) smpl);
+}
+
+void sampler_free(void* smpl) {
+    llama_sampler_free((llama_sampler*) smpl);
+}
+
+void sampler_reset(void* smpl) {
+    llama_sampler_reset((llama_sampler*) smpl);
+}
+
+void sampler_accept(void* smpl, int token) {
+    llama_sampler_accept((llama_sampler*) smpl, token);
+}
+
+int sampler_sample(void* state_ptr, void* smpl, int idx) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_sampler_sample((llama_sampler*) smpl, state->ctx, idx);
+}
+
+void* sampler_init_greedy(void)                    { return llama_sampler_init_greedy(); }
+void* sampler_init_dist(unsigned int seed)         { return llama_sampler_init_dist(seed); }
+void* sampler_init_top_k(int k)                    { return llama_sampler_init_top_k(k); }
+void* sampler_init_top_p(float p, int min_keep)    { return llama_sampler_init_top_p(p, (size_t) min_keep); }
+void* sampler_init_min_p(float p, int min_keep)    { return llama_sampler_init_min_p(p, (size_t) min_keep); }
+void* sampler_init_typical(float p, int min_keep)  { return llama_sampler_init_typical(p, (size_t) min_keep); }
+void* sampler_init_temp(float t)                   { return llama_sampler_init_temp(t); }
+void* sampler_init_temp_ext(float t, float delta, float exponent) { return llama_sampler_init_temp_ext(t, delta, exponent); }
+void* sampler_init_xtc(float p, float t, int min_keep, unsigned int seed) { return llama_sampler_init_xtc(p, t, (size_t) min_keep, seed); }
+void* sampler_init_top_n_sigma(float n)            { return llama_sampler_init_top_n_sigma(n); }
+void* sampler_init_mirostat_v2(unsigned int seed, float tau, float eta) { return llama_sampler_init_mirostat_v2(seed, tau, eta); }
+void* sampler_init_penalties(int last_n, float repeat, float freq, float present) { return llama_sampler_init_penalties(last_n, repeat, freq, present); }
+
+void* sampler_init_grammar(void* state_ptr, const char* grammar, const char* root) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab* vocab = llama_model_get_vocab(state->model);
+    return llama_sampler_init_grammar(vocab, grammar, root);
+}
+
+void* sampler_init_dry(void* state_ptr, float multiplier, float base, int allowed_length, int penalty_last_n) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab* vocab = llama_model_get_vocab(state->model);
+    return llama_sampler_init_dry(vocab, llama_model_n_ctx_train(state->model),
+                                  multiplier, base, allowed_length, penalty_last_n,
+                                  nullptr, 0);
+}
+
 int apply_chat_template(void* state_ptr, const char* tmpl, const char* messages_json,
                         bool add_generation_prompt, char* result, int result_size) {
     // Note: This is a simplified implementation - full implementation would need JSON parsing

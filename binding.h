@@ -159,6 +159,31 @@ bool backend_supports_rpc(void);
 int backend_max_devices(void);
 int backend_max_parallel_sequences(void);
 
+// Composable samplers. Build a chain with sampler_chain_init, append stages
+// created by the sampler_init_* helpers with sampler_chain_add (the chain takes
+// ownership), then sampler_sample from a decoded context. sampler_free releases
+// a sampler and, for a chain, every stage added to it.
+void* sampler_chain_init(void);
+void sampler_chain_add(void* chain, void* smpl);
+void sampler_free(void* smpl);
+void sampler_reset(void* smpl);
+void sampler_accept(void* smpl, int token);
+int sampler_sample(void* state_ptr, void* smpl, int idx);
+void* sampler_init_greedy(void);
+void* sampler_init_dist(unsigned int seed);
+void* sampler_init_top_k(int k);
+void* sampler_init_top_p(float p, int min_keep);
+void* sampler_init_min_p(float p, int min_keep);
+void* sampler_init_typical(float p, int min_keep);
+void* sampler_init_temp(float t);
+void* sampler_init_temp_ext(float t, float delta, float exponent);
+void* sampler_init_xtc(float p, float t, int min_keep, unsigned int seed);
+void* sampler_init_top_n_sigma(float n);
+void* sampler_init_mirostat_v2(unsigned int seed, float tau, float eta);
+void* sampler_init_penalties(int last_n, float repeat, float freq, float present);
+void* sampler_init_grammar(void* state_ptr, const char* grammar, const char* root);
+void* sampler_init_dry(void* state_ptr, float multiplier, float base, int allowed_length, int penalty_last_n);
+
 #ifdef __cplusplus
 }
 
