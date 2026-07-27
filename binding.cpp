@@ -38,6 +38,10 @@
 struct llama_binding_state {
     llama_model * model;
     llama_context * ctx;
+    // Active LoRA adapters applied to the context, kept so the whole set can be
+    // re-applied (llama_set_adapters_lora replaces the set) and freed on teardown.
+    std::vector<llama_adapter_lora *> lora_adapters;
+    std::vector<float> lora_scales;
 };
 
 // Parameters structure to pass sampling/generation config
@@ -453,10 +457,46 @@ void llama_binding_free_model(void *state_ptr) {
     if (state->ctx != nullptr) {
         llama_free(state->ctx);
     }
+    // Free adapters added via apply_lora_adapter while the model is still alive
+    // (llama_adapter_lora_free detaches each from the model's set), then free
+    // the model itself, which releases any remaining untracked adapters.
+    for (llama_adapter_lora * adapter : state->lora_adapters) {
+        llama_adapter_lora_free(adapter);
+    }
+    state->lora_adapters.clear();
+    state->lora_scales.clear();
     if (state->model != nullptr) {
         llama_model_free(state->model);
     }
     delete state;
+}
+
+// Load a LoRA adapter from file and add it to the set active on the context.
+// llama_set_adapters_lora replaces the whole set, so the binding tracks every
+// applied adapter and re-applies them together. Returns 0 on success, non-zero
+// if the adapter could not be loaded or applied.
+int apply_lora_adapter(void* state_ptr, const char* path, float scale) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    llama_adapter_lora * adapter = llama_adapter_lora_init(state->model, path);
+    if (adapter == nullptr) {
+        return 1;
+    }
+    state->lora_adapters.push_back(adapter);
+    state->lora_scales.push_back(scale);
+    return llama_set_adapters_lora(state->ctx, state->lora_adapters.data(),
+                                   state->lora_adapters.size(), state->lora_scales.data());
+}
+
+// Detach and free every LoRA adapter previously applied via apply_lora_adapter.
+int clear_lora_adapters(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    int ret = llama_set_adapters_lora(state->ctx, nullptr, 0, nullptr);
+    for (llama_adapter_lora * adapter : state->lora_adapters) {
+        llama_adapter_lora_free(adapter);
+    }
+    state->lora_adapters.clear();
+    state->lora_scales.clear();
+    return ret;
 }
 
 void llama_free_params(void* params_ptr) {

@@ -206,6 +206,21 @@ how much is 2+2?
 			_, ok = model.ModelMetadataValue("this.key.does.not.exist")
 			Expect(ok).To(BeFalse())
 		})
+
+		It("reports an error for a missing LoRA adapter", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, _ := getModel()
+			// Applying a nonexistent adapter must fail cleanly: the loader
+			// returns null rather than throwing across the C boundary.
+			err := model.ApplyLoRA("does-not-exist.gguf", 1.0)
+			Expect(err).To(HaveOccurred())
+
+			// Clearing when nothing is applied must be a safe no-op.
+			model.ClearLoRA()
+		})
 	})
 
 	Context("System info", func() {
