@@ -1134,6 +1134,172 @@ func SystemInfo() string {
 	return string(buf[:ret])
 }
 
+// StateSize returns the number of bytes StateData will produce for the whole
+// context, including every sequence in the KV cache.
+func (l *LLama) StateSize() int64 {
+	return int64(C.state_get_size(l.state))
+}
+
+// StateData serializes the entire context — KV cache, RNG, logits — into a
+// byte slice that SetStateData can restore into a context created with the
+// same model and the same geometry.
+//
+// It is the in-memory counterpart of SaveState. Prefer SequenceStateData when
+// you only need one conversation, since whole-context state grows with the
+// full KV cache.
+func (l *LLama) StateData() ([]byte, error) {
+	return stateBuf(func(buf []byte) int64 {
+		var p *C.uchar
+		if len(buf) > 0 {
+			p = (*C.uchar)(unsafe.Pointer(&buf[0]))
+		}
+		return int64(C.state_get_data(l.state, p, C.longlong(len(buf))))
+	})
+}
+
+// SetStateData restores a context previously serialized by StateData. The
+// context must have been created from the same model with the same geometry;
+// restoring mismatched state is not detected and will misbehave.
+func (l *LLama) SetStateData(data []byte) error {
+	if len(data) == 0 {
+		return errors.New("llama: empty state data")
+	}
+	n := int64(C.state_set_data(l.state, (*C.uchar)(unsafe.Pointer(&data[0])), C.longlong(len(data))))
+	if n == 0 {
+		return errors.New("llama: failed to restore context state")
+	}
+	return nil
+}
+
+// SaveSessionFile writes the context state plus tokens to path, in llama.cpp's
+// session file format. Unlike SaveState the token list travels with the state,
+// so another process can resume a conversation it did not start.
+func (l *LLama) SaveSessionFile(path string, tokens []int32) error {
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+
+	var p *C.int
+	if len(tokens) > 0 {
+		p = (*C.int)(unsafe.Pointer(&tokens[0]))
+	}
+	if !bool(C.state_save_file(l.state, cPath, p, C.int(len(tokens)))) {
+		return fmt.Errorf("llama: failed to write session file %q", path)
+	}
+	return nil
+}
+
+// LoadSessionFile restores a session written by SaveSessionFile and returns
+// the tokens stored alongside it.
+//
+// The engine rejects a session whose token count exceeds the buffer rather
+// than truncating, so the buffer is sized from the context: a session can
+// never hold more tokens than the context it was captured from.
+func (l *LLama) LoadSessionFile(path string) ([]int32, error) {
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+
+	capacity := int(C.context_n_ctx(l.state))
+	if capacity <= 0 {
+		capacity = l.contextSize
+	}
+	tokens := make([]int32, capacity)
+	n := int(C.state_load_file(l.state, cPath, (*C.int)(unsafe.Pointer(&tokens[0])), C.int(capacity)))
+	if n < 0 {
+		return nil, fmt.Errorf("llama: failed to read session file %q", path)
+	}
+	return tokens[:n], nil
+}
+
+// SequenceStateSize returns the number of bytes SequenceStateData will produce
+// for a single sequence.
+func (l *LLama) SequenceStateSize(seqID int32) int64 {
+	return int64(C.state_seq_get_size(l.state, C.int(seqID)))
+}
+
+// SequenceStateData serializes just the KV-cache state of one sequence. This
+// is the checkpoint a server wants: it captures a single conversation slot
+// without dragging along every other sequence in the context.
+func (l *LLama) SequenceStateData(seqID int32) ([]byte, error) {
+	return stateBuf(func(buf []byte) int64 {
+		var p *C.uchar
+		if len(buf) > 0 {
+			p = (*C.uchar)(unsafe.Pointer(&buf[0]))
+		}
+		return int64(C.state_seq_get_data(l.state, p, C.longlong(len(buf)), C.int(seqID)))
+	})
+}
+
+// SetSequenceStateData restores sequence state produced by SequenceStateData
+// into destSeqID, which need not be the sequence it was captured from — that
+// is what makes it usable for moving a conversation between context slots.
+func (l *LLama) SetSequenceStateData(data []byte, destSeqID int32) error {
+	if len(data) == 0 {
+		return errors.New("llama: empty sequence state data")
+	}
+	n := int64(C.state_seq_set_data(l.state, (*C.uchar)(unsafe.Pointer(&data[0])),
+		C.longlong(len(data)), C.int(destSeqID)))
+	if n == 0 {
+		return fmt.Errorf("llama: failed to restore state into sequence %d", destSeqID)
+	}
+	return nil
+}
+
+// SaveSequenceFile writes one sequence's state and its tokens to path.
+func (l *LLama) SaveSequenceFile(path string, seqID int32, tokens []int32) error {
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+
+	var p *C.int
+	if len(tokens) > 0 {
+		p = (*C.int)(unsafe.Pointer(&tokens[0]))
+	}
+	if !bool(C.state_seq_save_file(l.state, cPath, C.int(seqID), p, C.int(len(tokens)))) {
+		return fmt.Errorf("llama: failed to write sequence file %q", path)
+	}
+	return nil
+}
+
+// LoadSequenceFile restores a file written by SaveSequenceFile into destSeqID
+// and returns the tokens stored with it. The file's token count is probed
+// first, so the buffer is always exactly the right size.
+func (l *LLama) LoadSequenceFile(path string, destSeqID int32) ([]int32, error) {
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+
+	n := int(C.state_seq_file_token_count(l.state, cPath))
+	if n < 0 {
+		return nil, fmt.Errorf("llama: failed to read sequence file %q", path)
+	}
+
+	// A zero-token file still carries state, so the load must happen either
+	// way; give the engine a non-nil pointer to write into regardless.
+	tokens := make([]int32, n+1)
+	got := int(C.state_seq_load_file(l.state, cPath, C.int(destSeqID),
+		(*C.int)(unsafe.Pointer(&tokens[0])), C.int(n)))
+	if got < 0 {
+		return nil, fmt.Errorf("llama: failed to load sequence file %q", path)
+	}
+	return tokens[:got], nil
+}
+
+// stateBuf runs fn against a buffer sized by fn's own report. fn returns the
+// bytes written, or the negative of the size it needs; the first call probes
+// with an empty buffer, so exactly one allocation of the right size happens.
+func stateBuf(fn func(buf []byte) int64) ([]byte, error) {
+	need := fn(nil)
+	if need == 0 {
+		return nil, errors.New("llama: state is empty")
+	}
+	if need < 0 {
+		need = -need
+	}
+	buf := make([]byte, need)
+	got := fn(buf)
+	if got <= 0 {
+		return nil, errors.New("llama: failed to serialize state")
+	}
+	return buf[:got], nil
+}
 func (l *LLama) LoadState(state string) error {
 	d := C.CString(state)
 	w := C.CString("rb")

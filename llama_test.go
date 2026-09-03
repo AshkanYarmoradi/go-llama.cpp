@@ -2,6 +2,7 @@ package llama_test
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/AshkanYarmoradi/go-llama.cpp"
@@ -628,6 +629,190 @@ how much is 2+2?
 			Expect(arch.EmbdInp).To(BeNumerically(">", 0))
 			Expect(arch.EmbdOut).To(BeNumerically(">", 0))
 			Expect(arch.FileTypeName).To(Equal(FileTypeName(arch.FileType)))
+		})
+	})
+
+	Context("State and session persistence", func() {
+		newModel := func() *LLama {
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(model).ToNot(BeNil())
+			return model
+		}
+
+		// decodeInto pushes tokens through the model on seqID and returns them.
+		decodeInto := func(model *LLama, text string, seqID int32) []int32 {
+			tokens := model.Tokenize(text, true, false)
+			Expect(tokens).ToNot(BeEmpty())
+			batch := NewBatch(len(tokens), 1)
+			defer batch.Free()
+			for i, tok := range tokens {
+				Expect(batch.Add(tok, int32(i), []int32{seqID}, i == len(tokens)-1)).To(Succeed())
+			}
+			Expect(model.Decode(batch)).To(Equal(0))
+			return tokens
+		}
+
+		// stepFrom decodes one more token at pos on seqID and returns the
+		// resulting logits. Restored state is checked with this rather than by
+		// comparing logits buffers directly: llama_context::state_write_data
+		// serializes the memory module and the architecture string, and
+		// nothing else, so the logits buffer is deliberately not part of a
+		// saved state. What must round-trip is the cache — and the way to show
+		// that is that the next token predicts identically.
+		stepFrom := func(model *LLama, tok int32, pos int32, seqID int32) []float32 {
+			batch := NewBatch(1, 1)
+			defer batch.Free()
+			Expect(batch.Add(tok, pos, []int32{seqID}, true)).To(Succeed())
+			Expect(model.Decode(batch)).To(Equal(0))
+			return append([]float32(nil), model.Logits(-1)...)
+		}
+
+		It("round-trips whole-context state in memory", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := newModel()
+			defer model.Free()
+
+			tokens := decodeInto(model, "The capital of France is", 0)
+
+			data, err := model.StateData()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(int64(len(data))).To(BeNumerically("<=", model.StateSize()))
+
+			// What the model predicts one step past the captured state.
+			expected := stepFrom(model, tokens[0], int32(len(tokens)), 0)
+			Expect(expected).ToNot(BeEmpty())
+
+			// Disturb the context. The cache is cleared first because
+			// decodeInto always starts at position 0, and decoding into a
+			// sequence that still holds tokens collides on position.
+			model.MemoryClear(true)
+			decodeInto(model, "Something else entirely", 0)
+
+			Expect(model.SetStateData(data)).To(Succeed())
+			Expect(model.MemorySeqPosMax(0)).To(Equal(int32(len(tokens)-1)), "cache did not come back")
+
+			// Same step from the restored cache must predict the same thing.
+			Expect(stepFrom(model, tokens[0], int32(len(tokens)), 0)).To(Equal(expected))
+		})
+
+		It("rejects empty state data", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := newModel()
+			defer model.Free()
+
+			Expect(model.SetStateData(nil)).To(HaveOccurred())
+			Expect(model.SetSequenceStateData(nil, 0)).To(HaveOccurred())
+		})
+
+		It("round-trips a session file with its token list", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := newModel()
+			defer model.Free()
+
+			tokens := decodeInto(model, "The capital of France is", 0)
+			expected := stepFrom(model, tokens[0], int32(len(tokens)), 0)
+
+			// Capture after the extra step so the file holds that cache state.
+			path := filepath.Join(GinkgoT().TempDir(), "session.bin")
+			Expect(model.SaveSessionFile(path, tokens)).To(Succeed())
+
+			model.MemoryClear(true)
+			got, err := model.LoadSessionFile(path)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(got).To(Equal(tokens))
+			Expect(model.MemorySeqPosMax(0)).To(Equal(int32(len(tokens))))
+
+			// The saved cache already includes the extra step, so redoing it
+			// would collide; drop it first, then repeat and compare.
+			Expect(model.MemorySeqRemove(0, int32(len(tokens)), -1)).To(BeTrue())
+			Expect(stepFrom(model, tokens[0], int32(len(tokens)), 0)).To(Equal(expected))
+		})
+
+		It("round-trips one sequence without disturbing the others", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model, err := New(testModelPath, EnableF16Memory, SetContext(256), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			if model.ContextParams().NSeqMax < 2 {
+				Skip("context holds a single sequence")
+			}
+
+			a := decodeInto(model, "The capital of France is", 0)
+			decodeInto(model, "The largest ocean is", 1)
+
+			Expect(model.SequenceStateSize(0)).To(BeNumerically(">", int64(0)))
+			data, err := model.SequenceStateData(0)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(data).ToNot(BeEmpty())
+
+			posMax1 := model.MemorySeqPosMax(1)
+
+			// Drop sequence 0 only, then restore it from the checkpoint.
+			Expect(model.MemorySeqRemove(0, -1, -1)).To(BeTrue())
+			Expect(model.MemorySeqPosMax(0)).To(Equal(int32(-1)))
+
+			Expect(model.SetSequenceStateData(data, 0)).To(Succeed())
+			Expect(model.MemorySeqPosMax(0)).To(Equal(int32(len(a) - 1)))
+
+			// Sequence 1 was never touched.
+			Expect(model.MemorySeqPosMax(1)).To(Equal(posMax1))
+		})
+
+		It("restores a sequence file into a different sequence id", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model, err := New(testModelPath, EnableF16Memory, SetContext(256), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			if model.ContextParams().NSeqMax < 2 {
+				Skip("context holds a single sequence")
+			}
+
+			tokens := decodeInto(model, "The capital of France is", 0)
+
+			path := filepath.Join(GinkgoT().TempDir(), "seq.bin")
+			Expect(model.SaveSequenceFile(path, 0, tokens)).To(Succeed())
+
+			model.MemoryClear(true)
+
+			// Saved from sequence 0, restored into sequence 1.
+			got, err := model.LoadSequenceFile(path, 1)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(got).To(Equal(tokens))
+			Expect(model.MemorySeqPosMax(1)).To(Equal(int32(len(tokens) - 1)))
+			Expect(model.MemorySeqPosMax(0)).To(Equal(int32(-1)))
+		})
+
+		It("reports an error for a missing or malformed file", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := newModel()
+			defer model.Free()
+
+			dir := GinkgoT().TempDir()
+			_, err := model.LoadSessionFile(filepath.Join(dir, "does-not-exist.bin"))
+			Expect(err).To(HaveOccurred())
+
+			_, err = model.LoadSequenceFile(filepath.Join(dir, "does-not-exist.bin"), 0)
+			Expect(err).To(HaveOccurred())
+
+			junk := filepath.Join(dir, "junk.bin")
+			Expect(os.WriteFile(junk, []byte("not a state file at all"), 0o600)).To(Succeed())
+			_, err = model.LoadSequenceFile(junk, 0)
+			Expect(err).To(HaveOccurred())
 		})
 	})
 
