@@ -535,6 +535,102 @@ how much is 2+2?
 		})
 	})
 
+	Context("Vocabulary and architecture introspection", func() {
+		newModel := func() *LLama {
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(model).ToNot(BeNil())
+			return model
+		}
+
+		It("names enum values without a model", func() {
+			// LLAMA_FTYPE_ALL_F32 == 0 is stable across every llama.cpp release.
+			Expect(FileTypeName(0)).ToNot(BeEmpty())
+			Expect(VocabSPM.String()).To(Equal("spm"))
+			Expect(RopeNeox.String()).To(Equal("neox"))
+			Expect(PoolingMean.String()).To(Equal("mean"))
+		})
+
+		It("renders token attribute bitmasks", func() {
+			a := TokenAttrControl | TokenAttrByte
+			Expect(a.Has(TokenAttrControl)).To(BeTrue())
+			Expect(a.Has(TokenAttrByte)).To(BeTrue())
+			Expect(a.Has(TokenAttrNormal)).To(BeFalse())
+			Expect(a.Has(TokenAttrControl | TokenAttrByte)).To(BeTrue())
+			Expect(a.String()).To(Equal("control|byte"))
+			Expect(TokenAttrUndefined.String()).To(Equal("undefined"))
+		})
+
+		It("reports the tokenizer family", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := newModel()
+			defer model.Free()
+
+			Expect(model.VocabType()).ToNot(Equal(VocabNone))
+			Expect(model.VocabType().String()).ToNot(ContainSubstring("VocabType("))
+		})
+
+		It("describes individual tokens", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := newModel()
+			defer model.Free()
+
+			special := model.GetSpecialTokens()
+			Expect(special.EOS).To(BeNumerically(">=", int32(0)))
+
+			// EOS must both be a control token and end generation.
+			Expect(model.TokenText(special.EOS)).ToNot(BeEmpty())
+			Expect(model.IsEOG(special.EOS)).To(BeTrue())
+			Expect(model.IsControlToken(special.EOS)).To(BeTrue())
+			Expect(model.TokenAttr(special.EOS).Has(TokenAttrControl)).To(BeTrue())
+
+			// A plain word token must not.
+			toks := model.Tokenize("hello", false, false)
+			Expect(toks).ToNot(BeEmpty())
+			Expect(model.IsEOG(toks[0])).To(BeFalse())
+			Expect(model.IsControlToken(toks[0])).To(BeFalse())
+			Expect(model.TokenText(toks[0])).ToNot(BeEmpty())
+		})
+
+		It("rejects out-of-range tokens instead of reading past the vocabulary", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := newModel()
+			defer model.Free()
+
+			for _, bad := range []int32{-1, int32(model.GetModelInfo().VocabSize), 1 << 30} {
+				Expect(model.TokenText(bad)).To(BeEmpty())
+				Expect(model.TokenScore(bad)).To(Equal(float32(0)))
+				Expect(model.TokenAttr(bad)).To(Equal(TokenAttrUndefined))
+				Expect(model.IsEOG(bad)).To(BeFalse())
+				Expect(model.IsControlToken(bad)).To(BeFalse())
+			}
+		})
+
+		It("reports the model architecture", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := newModel()
+			defer model.Free()
+
+			arch := model.Architecture()
+			// A decoder-only causal LM: decoder present, encoder absent.
+			Expect(arch.HasDecoder).To(BeTrue())
+			Expect(arch.HasEncoder).To(BeFalse())
+			Expect(arch.RopeType).ToNot(Equal(RopeNone))
+			Expect(arch.FileTypeName).ToNot(BeEmpty())
+			Expect(arch.EmbdInp).To(BeNumerically(">", 0))
+			Expect(arch.EmbdOut).To(BeNumerically(">", 0))
+			Expect(arch.FileTypeName).To(Equal(FileTypeName(arch.FileType)))
+		})
+	})
+
 	Context("Inferencing tests with GPU (using "+testModelPath+") ", Label("gpu"), func() {
 		getModel := func() (*LLama, error) {
 			model, err := New(

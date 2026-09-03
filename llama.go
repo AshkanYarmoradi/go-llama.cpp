@@ -545,6 +545,298 @@ func (l *LLama) GetModelInfo() ModelInfo {
 	}
 }
 
+// VocabType identifies the tokenizer family a model's vocabulary uses.
+type VocabType int
+
+// Tokenizer families, mirroring llama_vocab_type.
+const (
+	VocabNone   VocabType = 0 // model carries no vocabulary
+	VocabSPM    VocabType = 1 // SentencePiece: byte-level BPE with byte fallback
+	VocabBPE    VocabType = 2 // GPT-2 style byte-level BPE
+	VocabWPM    VocabType = 3 // BERT WordPiece
+	VocabUGM    VocabType = 4 // T5 Unigram
+	VocabRWKV   VocabType = 5 // RWKV greedy tokenization
+	VocabPLaMo2 VocabType = 6 // PLaMo-2 Aho-Corasick
+)
+
+// String returns the llama.cpp name of the tokenizer family.
+func (v VocabType) String() string {
+	switch v {
+	case VocabNone:
+		return "none"
+	case VocabSPM:
+		return "spm"
+	case VocabBPE:
+		return "bpe"
+	case VocabWPM:
+		return "wpm"
+	case VocabUGM:
+		return "ugm"
+	case VocabRWKV:
+		return "rwkv"
+	case VocabPLaMo2:
+		return "plamo2"
+	default:
+		return fmt.Sprintf("VocabType(%d)", int(v))
+	}
+}
+
+// TokenAttr is a bitmask describing how a token behaves during tokenization.
+type TokenAttr int
+
+// Token attributes, mirroring llama_token_attr. Test them with Has.
+const (
+	TokenAttrUndefined   TokenAttr = 0
+	TokenAttrUnknown     TokenAttr = 1 << 0
+	TokenAttrUnused      TokenAttr = 1 << 1
+	TokenAttrNormal      TokenAttr = 1 << 2
+	TokenAttrControl     TokenAttr = 1 << 3
+	TokenAttrUserDefined TokenAttr = 1 << 4
+	TokenAttrByte        TokenAttr = 1 << 5
+	TokenAttrNormalized  TokenAttr = 1 << 6
+	TokenAttrLStrip      TokenAttr = 1 << 7
+	TokenAttrRStrip      TokenAttr = 1 << 8
+	TokenAttrSingleWord  TokenAttr = 1 << 9
+)
+
+// Has reports whether every bit of attr is set.
+func (a TokenAttr) Has(attr TokenAttr) bool { return a&attr == attr }
+
+// String renders the set bits as a pipe-joined list.
+func (a TokenAttr) String() string {
+	if a == TokenAttrUndefined {
+		return "undefined"
+	}
+	names := []struct {
+		bit  TokenAttr
+		name string
+	}{
+		{TokenAttrUnknown, "unknown"},
+		{TokenAttrUnused, "unused"},
+		{TokenAttrNormal, "normal"},
+		{TokenAttrControl, "control"},
+		{TokenAttrUserDefined, "user_defined"},
+		{TokenAttrByte, "byte"},
+		{TokenAttrNormalized, "normalized"},
+		{TokenAttrLStrip, "lstrip"},
+		{TokenAttrRStrip, "rstrip"},
+		{TokenAttrSingleWord, "single_word"},
+	}
+	var set []string
+	for _, n := range names {
+		if a&n.bit != 0 {
+			set = append(set, n.name)
+		}
+	}
+	if len(set) == 0 {
+		return fmt.Sprintf("TokenAttr(%d)", int(a))
+	}
+	return strings.Join(set, "|")
+}
+
+// VocabType returns the tokenizer family of the model's vocabulary.
+func (l *LLama) VocabType() VocabType {
+	return VocabType(C.get_vocab_type(l.state))
+}
+
+// TokenText returns the raw vocabulary entry for token: the piece exactly as
+// the tokenizer stores it, which for SPM models still carries the U+2581 word
+// boundary marker and for BPE models the byte-level escapes. It is the right
+// thing for inspecting a vocabulary and the wrong thing for building output:
+// use TokenToPiece for text you intend to concatenate.
+//
+// It returns "" for a token outside the vocabulary.
+func (l *LLama) TokenText(token int32) string {
+	buf := make([]byte, 256)
+	ret := int(C.get_vocab_token_text(l.state, C.int(token),
+		(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+	if ret <= 0 {
+		return ""
+	}
+	if ret > len(buf) {
+		buf = make([]byte, ret+1)
+		ret = int(C.get_vocab_token_text(l.state, C.int(token),
+			(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+		if ret <= 0 || ret > len(buf) {
+			return ""
+		}
+	}
+	return string(buf[:ret])
+}
+
+// TokenScore returns the vocabulary score for token, used by SPM and UGM
+// tokenizers to choose between competing merges. It is 0 for tokenizers that
+// do not use scores and for a token outside the vocabulary.
+func (l *LLama) TokenScore(token int32) float32 {
+	return float32(C.get_vocab_token_score(l.state, C.int(token)))
+}
+
+// TokenAttr returns the attribute bitmask for token, or TokenAttrUndefined for
+// a token outside the vocabulary.
+func (l *LLama) TokenAttr(token int32) TokenAttr {
+	return TokenAttr(C.get_vocab_token_attr(l.state, C.int(token)))
+}
+
+// IsEOG reports whether token ends generation. This covers every end-of-turn
+// and end-of-sequence token the model defines, not only EOS, and is what a
+// generation loop should actually test against.
+func (l *LLama) IsEOG(token int32) bool {
+	return bool(C.vocab_token_is_eog(l.state, C.int(token)))
+}
+
+// IsControlToken reports whether token is a control token rather than text.
+func (l *LLama) IsControlToken(token int32) bool {
+	return bool(C.vocab_token_is_control(l.state, C.int(token)))
+}
+
+// AddSeparator reports whether the tokenizer inserts a separator token: the
+// SEP counterpart to the BOS and EOS flags in SpecialTokens.
+func (l *LLama) AddSeparator() bool {
+	return bool(C.get_vocab_add_sep(l.state))
+}
+
+// SuppressTokens returns the tokens the model's vocabulary marks as never to
+// be generated. It returns nil when the vocabulary suppresses nothing.
+func (l *LLama) SuppressTokens() []int32 {
+	n := int(C.get_vocab_suppress_tokens(l.state, nil, 0))
+	if n == 0 {
+		return nil
+	}
+	if n < 0 {
+		n = -n
+	}
+	out := make([]int32, n)
+	got := int(C.get_vocab_suppress_tokens(l.state,
+		(*C.int)(unsafe.Pointer(&out[0])), C.int(n)))
+	if got <= 0 {
+		return nil
+	}
+	return out[:got]
+}
+
+// RopeType identifies the rotary position embedding variant a model uses.
+type RopeType int
+
+// RoPE variants, mirroring llama_rope_type. The values past NORM come from
+// ggml and are deliberately not a contiguous range.
+const (
+	RopeNone   RopeType = -1
+	RopeNorm   RopeType = 0
+	RopeNeox   RopeType = 2
+	RopeMrope  RopeType = 8
+	RopeVision RopeType = 24
+	RopeImrope RopeType = 40
+)
+
+// String returns a short name for the RoPE variant.
+func (r RopeType) String() string {
+	switch r {
+	case RopeNone:
+		return "none"
+	case RopeNorm:
+		return "norm"
+	case RopeNeox:
+		return "neox"
+	case RopeMrope:
+		return "mrope"
+	case RopeVision:
+		return "vision"
+	case RopeImrope:
+		return "imrope"
+	default:
+		return fmt.Sprintf("RopeType(%d)", int(r))
+	}
+}
+
+// Architecture describes structural properties of the loaded model that decide
+// how it has to be driven: which graph halves exist, how positions are encoded,
+// and how it was quantized.
+type Architecture struct {
+	// RopeType is the rotary position embedding variant.
+	RopeType RopeType
+	// FileType is the llama_ftype the model was quantized to.
+	FileType int
+	// FileTypeName is the engine's name for FileType, e.g. "Q4_K - Medium".
+	FileTypeName string
+	// HasEncoder and HasDecoder report which halves of an encoder-decoder
+	// model are present.
+	HasEncoder bool
+	HasDecoder bool
+	// DecoderStartToken opens decoding on an encoder-decoder model, or is -1
+	// when the model defines none.
+	DecoderStartToken int32
+	// IsRecurrent is true for recurrent (Mamba-style) models, which keep a
+	// rolling state instead of a growing KV cache.
+	IsRecurrent bool
+	// IsHybrid is true for models that mix attention and recurrent layers.
+	IsHybrid bool
+	// IsDiffusion is true for diffusion language models, which do not
+	// generate strictly left to right.
+	IsDiffusion bool
+	// EmbdInp and EmbdOut are the input and output embedding widths. They
+	// differ from ModelInfo.EmbeddingSize on models with a projection.
+	EmbdInp int
+	EmbdOut int
+	// LayersNextN is the number of multi-token-prediction layers, 0 when the
+	// model has none.
+	LayersNextN int
+	// ClassifierLabels names the outputs of a classifier head, nil for a
+	// model without one.
+	ClassifierLabels []string
+}
+
+// Architecture returns the structural properties of the loaded model.
+func (l *LLama) Architecture() Architecture {
+	a := Architecture{
+		RopeType:          RopeType(C.get_model_rope_type(l.state)),
+		FileType:          int(C.get_model_ftype(l.state)),
+		HasEncoder:        bool(C.model_has_encoder(l.state)),
+		HasDecoder:        bool(C.model_has_decoder(l.state)),
+		DecoderStartToken: int32(C.get_model_decoder_start_token(l.state)),
+		IsRecurrent:       bool(C.model_is_recurrent(l.state)),
+		IsHybrid:          bool(C.model_is_hybrid(l.state)),
+		IsDiffusion:       bool(C.model_is_diffusion(l.state)),
+		EmbdInp:           int(C.get_model_n_embd_inp(l.state)),
+		EmbdOut:           int(C.get_model_n_embd_out(l.state)),
+		LayersNextN:       int(C.get_model_n_layer_nextn(l.state)),
+	}
+	a.FileTypeName = FileTypeName(a.FileType)
+
+	if n := int(C.get_model_n_cls_out(l.state)); n > 0 {
+		buf := make([]byte, 128)
+		for i := 0; i < n; i++ {
+			ret := int(C.get_model_cls_label(l.state, C.int(i),
+				(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+			if ret <= 0 || ret > len(buf) {
+				continue
+			}
+			a.ClassifierLabels = append(a.ClassifierLabels, string(buf[:ret]))
+		}
+	}
+	return a
+}
+
+// FileTypeName returns llama.cpp's name for a llama_ftype value, for example
+// "Q4_K - Medium". It returns "" for an unrecognised value.
+func FileTypeName(ftype int) string {
+	buf := make([]byte, 128)
+	ret := int(C.ftype_name(C.int(ftype), (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+	if ret <= 0 || ret > len(buf) {
+		return ""
+	}
+	return string(buf[:ret])
+}
+
+// FlashAttnTypeName returns llama.cpp's name for a llama_flash_attn_type value.
+func FlashAttnTypeName(t int) string {
+	buf := make([]byte, 128)
+	ret := int(C.flash_attn_type_name(C.int(t), (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+	if ret <= 0 || ret > len(buf) {
+		return ""
+	}
+	return string(buf[:ret])
+}
+
 // ModelMetadata returns every key-value entry stored in the GGUF model header
 // (architecture, tokenizer settings, quantization, and so on).
 func (l *LLama) ModelMetadata() map[string]string {
