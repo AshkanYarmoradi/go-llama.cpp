@@ -118,9 +118,18 @@ int get_model_meta_val_str(void* state_ptr, const char* key, char* buf, int buf_
 int get_model_meta_key_by_index(void* state_ptr, int i, char* buf, int buf_size);
 int get_model_meta_val_str_by_index(void* state_ptr, int i, char* buf, int buf_size);
 
-// Chat template application
-int apply_chat_template(void* state_ptr, const char* tmpl, const char* messages_json,
-                        bool add_generation_prompt, char* result, int result_size);
+// Chat templates. apply_chat_template formats roles[i]/contents[i] (parallel
+// arrays of n_msg messages) with the given Jinja template; pass an empty tmpl
+// to use the template baked into the model. It returns the full byte length of
+// the result following snprintf semantics -- a value >= buf_size means the
+// output was truncated and the caller should retry with that size -- or a
+// negative value if the template is missing or unsupported.
+// chat_builtin_template_* enumerate the templates llama.cpp recognises by name.
+int apply_chat_template(void* state_ptr, const char* tmpl,
+                        const char** roles, const char** contents, int n_msg,
+                        bool add_assistant, char* buf, int buf_size);
+int chat_builtin_template_count(void);
+int chat_builtin_template_name(int i, char* buf, int buf_size);
 
 // Special token functions
 int get_vocab_bos(void* state_ptr);
