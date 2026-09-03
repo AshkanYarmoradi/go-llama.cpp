@@ -1,0 +1,83 @@
+name: Bug report
+description: Something in the binding behaves incorrectly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please check whether the problem reproduces with
+        llama.cpp itself (`llama-cli` from the submodule). If it does, it
+        belongs in [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp/issues)
+        rather than here — this repository is the Go binding layer.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproducer
+      description: >
+        The smallest Go program that shows the problem, plus the command you
+        built and ran it with.
+      render: go
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: go-llama.cpp commit
+      description: "`git rev-parse HEAD`"
+    validations:
+      required: true
+
+  - type: input
+    id: submodule
+    attributes:
+      label: llama.cpp submodule commit
+      description: "`git -C llama.cpp rev-parse HEAD`"
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: Name and quantization, e.g. "Llama-3.1-8B-Instruct Q4_K_M".
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Build type
+      options:
+        - CPU (default)
+        - cublas (NVIDIA)
+        - hipblas (AMD)
+        - metal (Apple)
+        - clblas (OpenCL)
+        - openblas
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: OS and version, Go version (`go version`), compiler version.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output
+      description: >
+        Relevant compiler errors or runtime output. llama.cpp is verbose on
+        stderr; include it, it usually says what went wrong.
+      render: shell
