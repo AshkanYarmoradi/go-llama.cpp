@@ -1858,3 +1858,85 @@ unsigned int sampler_get_seed(void* smpl) {
 }
 
 static_assert(LLAMA_DEFAULT_SEED == 0xFFFFFFFF, "DefaultSeed out of sync with llama.go");
+
+//
+// Backend sampling (llama.cpp v0.3.0, [EXPERIMENTAL] upstream)
+//
+// Normally sampling happens on the CPU: decode produces logits, they are
+// copied back to host memory, and a sampler chain picks a token. Attaching a
+// chain to a sequence lets the backend sample as part of the graph, so the
+// full vocabulary of logits never crosses the device boundary.
+//
+// The caller keeps ownership of the chain and must keep it alive for as long
+// as it is attached to the context.
+//
+
+bool set_sequence_sampler(void* state_ptr, int seq_id, void* chain) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_set_sampler(state->ctx, seq_id, (llama_sampler*) chain);
+}
+
+// Returns the token the backend sampled for the i-th output, or -1
+// (LLAMA_TOKEN_NULL) when nothing was sampled for it.
+int get_sampled_token(void* state_ptr, int i) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_get_sampled_token_ith(state->ctx, i);
+}
+
+// The three accessors below share a shape: passing out = NULL returns the
+// number of available values so the caller can size a buffer, and passing a
+// buffer copies min(count, out_size) values and returns how many were written.
+// Returns 0 when the backend sampled nothing for this index.
+
+int get_sampled_probs(void* state_ptr, int i, float* out, int out_size) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const int n = (int) llama_get_sampled_probs_count_ith(state->ctx, i);
+    if (out == nullptr || n <= 0) {
+        return n > 0 ? n : 0;
+    }
+    const float* src = llama_get_sampled_probs_ith(state->ctx, i);
+    if (src == nullptr) {
+        return 0;
+    }
+    const int n_copy = n < out_size ? n : out_size;
+    for (int j = 0; j < n_copy; j++) {
+        out[j] = src[j];
+    }
+    return n_copy;
+}
+
+int get_sampled_logits(void* state_ptr, int i, float* out, int out_size) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const int n = (int) llama_get_sampled_logits_count_ith(state->ctx, i);
+    if (out == nullptr || n <= 0) {
+        return n > 0 ? n : 0;
+    }
+    const float* src = llama_get_sampled_logits_ith(state->ctx, i);
+    if (src == nullptr) {
+        return 0;
+    }
+    const int n_copy = n < out_size ? n : out_size;
+    for (int j = 0; j < n_copy; j++) {
+        out[j] = src[j];
+    }
+    return n_copy;
+}
+
+// Candidate token ids, which is what maps a probs/logits index back to a
+// vocabulary token. Its count matches the probs count.
+int get_sampled_candidates(void* state_ptr, int i, int* out, int out_size) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const int n = (int) llama_get_sampled_candidates_count_ith(state->ctx, i);
+    if (out == nullptr || n <= 0) {
+        return n > 0 ? n : 0;
+    }
+    const llama_token* src = llama_get_sampled_candidates_ith(state->ctx, i);
+    if (src == nullptr) {
+        return 0;
+    }
+    const int n_copy = n < out_size ? n : out_size;
+    for (int j = 0; j < n_copy; j++) {
+        out[j] = src[j];
+    }
+    return n_copy;
+}

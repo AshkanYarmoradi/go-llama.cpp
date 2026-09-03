@@ -187,6 +187,97 @@ func (l *LLama) embeddingBuf(fn func(out []float32) int) []float32 {
 	return out[:got]
 }
 
+// SetSequenceSampler attaches a sampler chain to a sequence so the backend
+// samples inside the compute graph, instead of copying a full vocabulary of
+// logits back to host memory for the CPU to sample from. After a Decode, read
+// the result with SampledToken rather than Logits plus Sampler.Sample.
+//
+// chain must be a chain from NewSamplerChain, not a bare stage. The caller
+// keeps ownership: the chain must stay alive, and unfreed, for as long as it
+// is attached to the context.
+//
+// This is marked experimental upstream. It reports whether the engine accepted
+// the chain; a context that was not built for backend sampling returns false,
+// and CPU sampling through Sampler.Sample keeps working.
+func (l *LLama) SetSequenceSampler(seqID int32, chain *Sampler) bool {
+	if chain == nil || chain.ptr == nil {
+		return false
+	}
+	return bool(C.set_sequence_sampler(l.state, C.int(seqID), chain.ptr))
+}
+
+// SampledToken returns the token the backend sampled for the i-th output of
+// the last Decode; i = -1 selects the last. It returns -1 when the backend
+// sampled nothing for that index, which is the normal result if no sampler is
+// attached to the sequence.
+//
+// Reading a token does not advance the sampler's state — that happens when the
+// token is accepted. With multiple outputs, accept a contiguous prefix in
+// output order.
+func (l *LLama) SampledToken(i int) int32 {
+	return int32(C.get_sampled_token(l.state, C.int(i)))
+}
+
+// SampledCandidates returns the token ids the backend sampler kept for the
+// i-th output. These are what map an index in SampledProbs or SampledLogits
+// back to a vocabulary token: candidates[k] is the token whose probability is
+// probs[k]. It returns nil when the backend sampled nothing.
+func (l *LLama) SampledCandidates(i int) []int32 {
+	n := int(C.get_sampled_candidates(l.state, C.int(i), nil, 0))
+	if n <= 0 {
+		return nil
+	}
+	out := make([]int32, n)
+	got := int(C.get_sampled_candidates(l.state, C.int(i),
+		(*C.int)(unsafe.Pointer(&out[0])), C.int(n)))
+	if got <= 0 {
+		return nil
+	}
+	return out[:got]
+}
+
+// SampledProbs returns the probabilities the backend sampler produced for the
+// i-th output, aligned with SampledCandidates. It returns nil when the backend
+// produced none — a chain without a distribution stage yields no probabilities.
+func (l *LLama) SampledProbs(i int) []float32 {
+	return sampledFloats(func(out []float32) int {
+		var p *C.float
+		if len(out) > 0 {
+			p = (*C.float)(unsafe.Pointer(&out[0]))
+		}
+		return int(C.get_sampled_probs(l.state, C.int(i), p, C.int(len(out))))
+	})
+}
+
+// SampledLogits returns the logits the backend sampler kept for the i-th
+// output, aligned with SampledCandidates. Unlike Logits, which returns the
+// whole vocabulary, this is only the candidates that survived the chain. It
+// returns nil when the backend kept none.
+func (l *LLama) SampledLogits(i int) []float32 {
+	return sampledFloats(func(out []float32) int {
+		var p *C.float
+		if len(out) > 0 {
+			p = (*C.float)(unsafe.Pointer(&out[0]))
+		}
+		return int(C.get_sampled_logits(l.state, C.int(i), p, C.int(len(out))))
+	})
+}
+
+// sampledFloats probes fn for the available count, then fills a buffer of
+// exactly that size.
+func sampledFloats(fn func(out []float32) int) []float32 {
+	n := fn(nil)
+	if n <= 0 {
+		return nil
+	}
+	out := make([]float32, n)
+	got := fn(out)
+	if got <= 0 {
+		return nil
+	}
+	return out[:got]
+}
+
 // MemoryClear drops the context's KV cache. When clearData is true the
 // underlying data buffers are cleared too, not just the cell metadata.
 func (l *LLama) MemoryClear(clearData bool) {

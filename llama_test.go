@@ -973,6 +973,89 @@ how much is 2+2?
 		})
 	})
 
+	Context("Backend sampling", func() {
+		newModel := func() *LLama {
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(model).ToNot(BeNil())
+			return model
+		}
+
+		It("rejects a nil or empty chain", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := newModel()
+			defer model.Free()
+
+			Expect(model.SetSequenceSampler(0, nil)).To(BeFalse())
+			Expect(model.SetSequenceSampler(0, &Sampler{})).To(BeFalse())
+		})
+
+		It("reports no sampled output when no sampler is attached", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := newModel()
+			defer model.Free()
+
+			_, err := model.Predict("The capital of France is", SetTokens(4))
+			Expect(err).ToNot(HaveOccurred())
+
+			// Without a backend sampler these are all empty, and must say so
+			// rather than reading past a null pointer.
+			Expect(model.SampledToken(-1)).To(Equal(int32(-1)))
+			Expect(model.SampledCandidates(-1)).To(BeNil())
+			Expect(model.SampledProbs(-1)).To(BeNil())
+			Expect(model.SampledLogits(-1)).To(BeNil())
+		})
+
+		It("samples on the backend when a chain is attached", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := newModel()
+			defer model.Free()
+
+			// The chain must outlive the attachment, so it is freed last.
+			chain := NewSamplerChain()
+			defer chain.Free()
+			chain.Add(SamplerTopK(40))
+			chain.Add(SamplerTemp(0.8))
+			chain.Add(SamplerDist(1234))
+
+			if !model.SetSequenceSampler(0, chain) {
+				Skip("this context was not built for backend sampling")
+			}
+
+			tokens := model.Tokenize("The capital of France is", true, false)
+			Expect(tokens).ToNot(BeEmpty())
+			batch := NewBatch(len(tokens), 1)
+			defer batch.Free()
+			for i, tok := range tokens {
+				Expect(batch.Add(tok, int32(i), []int32{0}, i == len(tokens)-1)).To(Succeed())
+			}
+			Expect(model.Decode(batch)).To(Equal(0))
+
+			tok := model.SampledToken(-1)
+			Expect(tok).To(BeNumerically(">=", int32(0)))
+			Expect(tok).To(BeNumerically("<", int32(model.GetModelInfo().VocabSize)))
+
+			// Candidates index the probability array, so when both are present
+			// they must be the same length and the token must be among them.
+			cands := model.SampledCandidates(-1)
+			probs := model.SampledProbs(-1)
+			if len(probs) > 0 {
+				Expect(cands).To(HaveLen(len(probs)))
+				Expect(cands).To(ContainElement(tok))
+				for _, p := range probs {
+					Expect(p).To(BeNumerically(">=", float32(0)))
+					Expect(p).To(BeNumerically("<=", float32(1)))
+				}
+			}
+		})
+	})
+
 	Context("Inferencing tests with GPU (using "+testModelPath+") ", Label("gpu"), func() {
 		getModel := func() (*LLama, error) {
 			model, err := New(

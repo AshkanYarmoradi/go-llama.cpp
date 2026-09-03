@@ -94,6 +94,20 @@ bool memory_seq_rm(void* state_ptr, int seq_id, int p0, int p1);
 void memory_seq_cp(void* state_ptr, int src, int dst, int p0, int p1);
 void memory_seq_keep(void* state_ptr, int seq_id);
 
+// Backend sampling (llama.cpp v0.3.0, [EXPERIMENTAL] upstream). Attaching a
+// sampler chain to a sequence lets the backend sample inside the graph, so the
+// full vocabulary of logits never crosses the device boundary. The caller
+// keeps ownership of the chain and must keep it alive while it is attached.
+//
+// The three array accessors take out = NULL to report the available count,
+// or a buffer to copy into, returning how many values were written. All
+// return 0 when the backend sampled nothing for that index.
+bool set_sequence_sampler(void* state_ptr, int seq_id, void* chain);
+int get_sampled_token(void* state_ptr, int i);
+int get_sampled_probs(void* state_ptr, int i, float* out, int out_size);
+int get_sampled_logits(void* state_ptr, int i, float* out, int out_size);
+int get_sampled_candidates(void* state_ptr, int i, int* out, int out_size);
+
 
 // State and session persistence. The load_state / save_state pair above
 // round-trips a whole context as raw bytes. These add what it cannot express:
