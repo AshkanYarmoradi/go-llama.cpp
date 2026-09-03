@@ -1755,3 +1755,106 @@ int state_seq_load_file(void* state_ptr, const char* path, int dest_seq_id,
     }
     return (int) n_out;
 }
+
+//
+// Remaining sampler stages and chain introspection
+//
+
+// Fill-in-the-middle infill sampler. Meant to run after top-k and top-p: it
+// merges same-prefix candidates and prefers an EOG token once the infill is
+// complete, which is what stops FIM generation from running past the hole.
+void* sampler_init_infill(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab* vocab = llama_model_get_vocab(state->model);
+    return llama_sampler_init_infill(vocab);
+}
+
+// Adaptive-p. Upstream recommends running it with min-p as the only other
+// active truncation stage in the chain.
+void* sampler_init_adaptive_p(float target, float decay, unsigned int seed) {
+    return llama_sampler_init_adaptive_p(target, decay, seed);
+}
+
+// Logit bias. biases is a flat array of n_bias (token, bias) pairs, kept flat
+// so cgo does not have to mirror llama_logit_bias.
+void* sampler_init_logit_bias(void* state_ptr, int n_bias, const int* tokens, const float* biases) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab* vocab = llama_model_get_vocab(state->model);
+    if (n_bias < 0 || (n_bias > 0 && (tokens == nullptr || biases == nullptr))) {
+        return nullptr;
+    }
+    std::vector<llama_logit_bias> lb;
+    lb.reserve((size_t) n_bias);
+    for (int i = 0; i < n_bias; i++) {
+        lb.push_back({ tokens[i], biases[i] });
+    }
+    return llama_sampler_init_logit_bias(llama_vocab_n_tokens(vocab), n_bias, lb.data());
+}
+
+// Lazy grammar: stays inactive until one of the trigger patterns or trigger
+// tokens is seen, then constrains the rest of the output. This is how tool-call
+// grammars are applied only from the point the model starts emitting a call.
+void* sampler_init_grammar_lazy(void* state_ptr, const char* grammar, const char* root,
+                                const char** trigger_patterns, int n_patterns,
+                                const int* trigger_tokens, int n_tokens) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab* vocab = llama_model_get_vocab(state->model);
+    if (n_patterns < 0 || n_tokens < 0) {
+        return nullptr;
+    }
+    return llama_sampler_init_grammar_lazy_patterns(
+        vocab, grammar, root,
+        trigger_patterns, (size_t) n_patterns,
+        (const llama_token*) trigger_tokens, (size_t) n_tokens);
+}
+
+// Chain introspection. sampler_chain_get borrows a stage (the chain keeps
+// ownership); sampler_chain_remove detaches one and hands ownership to the
+// caller, who must free it.
+int sampler_chain_n(void* chain) {
+    if (chain == nullptr) {
+        return 0;
+    }
+    return llama_sampler_chain_n((const llama_sampler*) chain);
+}
+
+void* sampler_chain_get(void* chain, int i) {
+    if (chain == nullptr) {
+        return nullptr;
+    }
+    return llama_sampler_chain_get((llama_sampler*) chain, i);
+}
+
+void* sampler_chain_remove(void* chain, int i) {
+    if (chain == nullptr) {
+        return nullptr;
+    }
+    return llama_sampler_chain_remove((llama_sampler*) chain, i);
+}
+
+int sampler_name(void* smpl, char* buf, int buf_size) {
+    if (smpl == nullptr) {
+        return -1;
+    }
+    const char* name = llama_sampler_name((const llama_sampler*) smpl);
+    if (name == nullptr) {
+        return -1;
+    }
+    return snprintf(buf, (size_t) buf_size, "%s", name);
+}
+
+void* sampler_clone(void* smpl) {
+    if (smpl == nullptr) {
+        return nullptr;
+    }
+    return llama_sampler_clone((const llama_sampler*) smpl);
+}
+
+unsigned int sampler_get_seed(void* smpl) {
+    if (smpl == nullptr) {
+        return LLAMA_DEFAULT_SEED;
+    }
+    return llama_sampler_get_seed((const llama_sampler*) smpl);
+}
+
+static_assert(LLAMA_DEFAULT_SEED == 0xFFFFFFFF, "DefaultSeed out of sync with llama.go");

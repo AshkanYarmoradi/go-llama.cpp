@@ -288,6 +288,28 @@ void* sampler_init_penalties(void* state_ptr, int last_n, float repeat, float fr
 void* sampler_init_grammar(void* state_ptr, const char* grammar, const char* root);
 void* sampler_init_dry(void* state_ptr, float multiplier, float base, int allowed_length, int penalty_last_n);
 
+// Remaining sampler stages. sampler_init_logit_bias takes the (token, bias)
+// pairs as two parallel arrays. sampler_init_grammar_lazy builds a grammar
+// that stays inactive until a trigger pattern or token appears. Every
+// sampler_init_* returns NULL on invalid input, which sampler_chain_add
+// ignores.
+void* sampler_init_infill(void* state_ptr);
+void* sampler_init_adaptive_p(float target, float decay, unsigned int seed);
+void* sampler_init_logit_bias(void* state_ptr, int n_bias, const int* tokens, const float* biases);
+void* sampler_init_grammar_lazy(void* state_ptr, const char* grammar, const char* root,
+                                const char** trigger_patterns, int n_patterns,
+                                const int* trigger_tokens, int n_tokens);
+
+// Chain introspection. sampler_chain_get borrows a stage -- the chain keeps
+// ownership -- while sampler_chain_remove detaches one and transfers ownership
+// to the caller, who must free it. sampler_clone also returns an owned sampler.
+int sampler_chain_n(void* chain);
+void* sampler_chain_get(void* chain, int i);
+void* sampler_chain_remove(void* chain, int i);
+int sampler_name(void* smpl, char* buf, int buf_size);
+void* sampler_clone(void* smpl);
+unsigned int sampler_get_seed(void* smpl);
+
 #ifdef __cplusplus
 }
 
