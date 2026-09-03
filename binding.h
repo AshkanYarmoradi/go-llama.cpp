@@ -159,6 +159,46 @@ bool backend_supports_rpc(void);
 int backend_max_devices(void);
 int backend_max_parallel_sequences(void);
 
+
+// Context runtime introspection and control. The engine may clamp or round the
+// values requested via load_model, so these report what the context actually
+// uses. context_pooling_type returns a llama_pooling_type enum value.
+int context_n_ctx(void* state_ptr);
+int context_n_ctx_seq(void* state_ptr);
+int context_n_batch(void* state_ptr);
+int context_n_ubatch(void* state_ptr);
+int context_n_seq_max(void* state_ptr);
+int context_n_rs_seq(void* state_ptr);
+int context_pooling_type(void* state_ptr);
+int context_n_threads(void* state_ptr);
+int context_n_threads_batch(void* state_ptr);
+void context_set_n_threads(void* state_ptr, int n_threads, int n_threads_batch);
+void context_set_embeddings(void* state_ptr, bool embeddings);
+void context_set_causal_attn(void* state_ptr, bool causal_attn);
+void context_synchronize(void* state_ptr);
+
+// Further KV-cache operations. memory_seq_add shifts, and memory_seq_div
+// divides, the positions of a sequence in [p0, p1); negative p0/p1 mean "from
+// the start" / "to the end". The pos accessors return -1 for an empty sequence.
+void memory_seq_add(void* state_ptr, int seq_id, int p0, int p1, int delta);
+void memory_seq_div(void* state_ptr, int seq_id, int p0, int p1, int d);
+int memory_seq_pos_min(void* state_ptr, int seq_id);
+int memory_seq_pos_max(void* state_ptr, int seq_id);
+bool memory_can_shift(void* state_ptr);
+
+// Performance counters. Every out-parameter is optional (pass NULL to skip).
+// perf_sampler only reports data for samplers built with sampler_chain_init.
+void perf_context(void* state_ptr, double* t_start_ms, double* t_load_ms,
+                  double* t_p_eval_ms, double* t_eval_ms,
+                  int* n_p_eval, int* n_eval, int* n_reused);
+void perf_context_reset(void* state_ptr);
+void perf_sampler(void* smpl, double* t_sample_ms, int* n_sample);
+void perf_sampler_reset(void* smpl);
+
+// Library-level information, available without a loaded model.
+const char* llama_version_str(void);
+long long llama_time_us_val(void);
+
 // Composable samplers. Build a chain with sampler_chain_init, append stages
 // created by the sampler_init_* helpers with sampler_chain_add (the chain takes
 // ownership), then sampler_sample from a decoded context. sampler_free releases
