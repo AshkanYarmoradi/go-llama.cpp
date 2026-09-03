@@ -399,7 +399,6 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, int result_siz
         if (params_p->dry_multiplier > 0.0f) {
             llama_sampler_chain_add(smpl, llama_sampler_init_dry(
                 vocab,
-                llama_model_n_ctx_train(model),
                 params_p->dry_multiplier,
                 params_p->dry_base,
                 params_p->dry_allowed_length,
@@ -411,6 +410,7 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, int result_siz
         // Add penalty sampler if needed
         if (params_p->repeat_penalty != 1.0f || params_p->frequency_penalty != 0.0f || params_p->presence_penalty != 0.0f) {
             llama_sampler_chain_add(smpl, llama_sampler_init_penalties(
+                llama_vocab_n_tokens(vocab),
                 params_p->repeat_last_n,
                 params_p->repeat_penalty,
                 params_p->frequency_penalty,
@@ -1196,7 +1196,11 @@ void* sampler_init_temp_ext(float t, float delta, float exponent) { return llama
 void* sampler_init_xtc(float p, float t, int min_keep, unsigned int seed) { return llama_sampler_init_xtc(p, t, (size_t) min_keep, seed); }
 void* sampler_init_top_n_sigma(float n)            { return llama_sampler_init_top_n_sigma(n); }
 void* sampler_init_mirostat_v2(unsigned int seed, float tau, float eta) { return llama_sampler_init_mirostat_v2(seed, tau, eta); }
-void* sampler_init_penalties(int last_n, float repeat, float freq, float present) { return llama_sampler_init_penalties(last_n, repeat, freq, present); }
+void* sampler_init_penalties(void* state_ptr, int last_n, float repeat, float freq, float present) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab* vocab = llama_model_get_vocab(state->model);
+    return llama_sampler_init_penalties(llama_vocab_n_tokens(vocab), last_n, repeat, freq, present);
+}
 
 void* sampler_init_grammar(void* state_ptr, const char* grammar, const char* root) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
@@ -1207,8 +1211,7 @@ void* sampler_init_grammar(void* state_ptr, const char* grammar, const char* roo
 void* sampler_init_dry(void* state_ptr, float multiplier, float base, int allowed_length, int penalty_last_n) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
     const llama_vocab* vocab = llama_model_get_vocab(state->model);
-    return llama_sampler_init_dry(vocab, llama_model_n_ctx_train(state->model),
-                                  multiplier, base, allowed_length, penalty_last_n,
+    return llama_sampler_init_dry(vocab, multiplier, base, allowed_length, penalty_last_n,
                                   nullptr, 0);
 }
 

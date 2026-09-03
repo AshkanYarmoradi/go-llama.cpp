@@ -272,8 +272,14 @@ func SamplerTopNSigma(n float32) *Sampler {
 func SamplerMirostatV2(seed uint32, tau, eta float32) *Sampler {
 	return &Sampler{ptr: C.sampler_init_mirostat_v2(C.uint(seed), C.float(tau), C.float(eta))}
 }
-func SamplerPenalties(lastN int, repeat, freq, present float32) *Sampler {
-	return &Sampler{ptr: C.sampler_init_penalties(C.int(lastN), C.float(repeat), C.float(freq), C.float(present))}
+
+// SamplerPenalties builds a repetition/frequency/presence penalty stage. lastN
+// is how many recent tokens to consider (0 disables the stage); repeat, freq
+// and present are the repetition, frequency and presence penalties, where 1.0,
+// 0.0 and 0.0 respectively mean "disabled". It is a method on LLama because the
+// engine sizes the stage from the model's vocabulary.
+func (l *LLama) SamplerPenalties(lastN int, repeat, freq, present float32) *Sampler {
+	return &Sampler{ptr: C.sampler_init_penalties(l.state, C.int(lastN), C.float(repeat), C.float(freq), C.float(present))}
 }
 
 // SamplerGrammar builds a GBNF grammar-constrained stage from the model's vocab.
