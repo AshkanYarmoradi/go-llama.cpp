@@ -1,20 +1,36 @@
 name: CI
+
+# The matrix tracks the `go` directive in go.mod. Testing an older toolchain
+# than the module declares does not work: setup-go pins GOTOOLCHAIN=local, so
+# the build fails outright rather than quietly fetching a newer Go and testing
+# that instead.
 on:
   pull_request:
   push:
     branches:
-      - master
+      - main
     tags:
       - '*'
+  workflow_dispatch:
+
+# Each job here downloads a multi-gigabyte model and builds all of llama.cpp,
+# so a superseded run has nothing left to prove.
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   ubuntu-latest:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: ['1.24.x', 'stable']
+        go-version: ['1.25.x', 'stable']
     steps:
       - name: Clone
-        uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: 
           submodules: true
       - name: Dependencies
@@ -22,7 +38,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install build-essential
       - name: Setup Go ${{ matrix.go-version }}
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go-version }}
       # You can test your matrix by printing the current Go version
@@ -36,14 +52,14 @@ jobs:
     runs-on: macOS-latest
     strategy:
       matrix:
-        go-version: ['1.24.x', 'stable']
+        go-version: ['1.25.x', 'stable']
     steps:
       - name: Clone
-        uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: 
           submodules: true
       - name: Setup Go ${{ matrix.go-version }}
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go-version }}
       # You can test your matrix by printing the current Go version
@@ -57,14 +73,14 @@ jobs:
     runs-on: macOS-latest
     strategy:
       matrix:
-        go-version: ['1.24.x', 'stable']
+        go-version: ['1.25.x', 'stable']
     steps:
       - name: Clone
-        uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: 
           submodules: true
       - name: Setup Go ${{ matrix.go-version }}
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go-version }}
       # You can test your matrix by printing the current Go version

@@ -1,0 +1,81 @@
+name: Lint
+
+# Fast static checks. The CI workflow downloads a multi-gigabyte model and
+# builds all of llama.cpp, so it takes ~20 minutes per job; these run in about
+# a minute and catch the mistakes that do not need any of that.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - '*'
+  workflow_dispatch:
+
+concurrency:
+  group: lint-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+
+      # Scoped to this repo's own sources: the llama.cpp submodule is not ours
+      # to format.
+      - name: gofmt
+        run: |
+          unformatted="$(find . -name '*.go' -not -path './llama.cpp/*' -print0 | xargs -0 gofmt -l -e)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt-clean:"
+            echo "$unformatted"
+            gofmt -d -e $unformatted
+            exit 1
+          fi
+
+      # go vet type-checks the cgo layer against binding.h without needing
+      # libbinding.a, so it catches signature drift between Go and C.
+      - name: go vet
+        run: go vet ./...
+
+      - name: go mod tidy is up to date
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+  cpp:
+    name: C++
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+
+      # Compiles binding.cpp against the llama.cpp headers with the same
+      # warning flags the real build uses. Needs no CMake and no llama.cpp
+      # build, so it reports engine API breakage in seconds rather than after
+      # a full compile.
+      - name: Compile-check binding.cpp
+        run: |
+          c++ -I./llama.cpp -I./llama.cpp/include -I./llama.cpp/ggml/include \
+              -I. -I./llama.cpp/common \
+              -std=c++17 -fPIC -Wall -Wextra -Wpedantic -Wcast-qual \
+              -Wno-unused-function -fsyntax-only binding.cpp
+
+      - name: Every binding.h declaration is defined
+        run: bash ./scripts/check-binding-symbols.sh
