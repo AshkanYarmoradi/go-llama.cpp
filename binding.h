@@ -58,6 +58,21 @@ void llama_binding_free_model(void* state);
 int apply_lora_adapter(void* state_ptr, const char* path, float scale);
 int clear_lora_adapters(void* state_ptr);
 
+// LoRA adapter introspection and control vectors. Adapters are addressed by
+// their index in the set applied through apply_lora_adapter, in application
+// order; every accessor returns -1 for an index outside that set. The metadata
+// functions follow snprintf semantics. lora_adapter_alora_tokens returns the
+// invocation-token count (0 for a plain LoRA), or the negative of it when
+// max_tokens is too small. set_control_vector takes an n_embd x n_layers
+// buffer starting from layer 1, or data = NULL to clear the active vector.
+int lora_adapter_count(void* state_ptr);
+int lora_adapter_meta_count(void* state_ptr, int i);
+int lora_adapter_meta_val_str(void* state_ptr, int i, const char* key, char* buf, int buf_size);
+int lora_adapter_meta_key_by_index(void* state_ptr, int i, int j, char* buf, int buf_size);
+int lora_adapter_meta_val_str_by_index(void* state_ptr, int i, int j, char* buf, int buf_size);
+int lora_adapter_alora_tokens(void* state_ptr, int i, int* tokens_out, int max_tokens);
+int set_control_vector(void* state_ptr, const float* data, int len, int n_embd, int il_start, int il_end);
+
 int llama_tokenize_string(void* params_ptr, void* state_pr, int* result);
 
 // Direct tokenization helpers that do not require a binding_params struct.

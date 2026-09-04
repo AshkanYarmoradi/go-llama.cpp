@@ -1940,3 +1940,104 @@ int get_sampled_candidates(void* state_ptr, int i, int* out, int out_size) {
     }
     return n_copy;
 }
+
+//
+// LoRA adapter introspection and control vectors
+//
+// Adapters are addressed by their index in the set applied through
+// apply_lora_adapter, in the order they were applied. Every function here
+// returns -1 for an index outside that set.
+//
+
+int lora_adapter_count(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return (int) state->lora_adapters.size();
+}
+
+// Returns the adapter at index i, or nullptr when i is out of range.
+static llama_adapter_lora* lora_at(llama_binding_state* state, int i) {
+    if (state == nullptr || i < 0 || (size_t) i >= state->lora_adapters.size()) {
+        return nullptr;
+    }
+    return state->lora_adapters[(size_t) i];
+}
+
+int lora_adapter_meta_count(void* state_ptr, int i) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    llama_adapter_lora* a = lora_at(state, i);
+    if (a == nullptr) {
+        return -1;
+    }
+    return llama_adapter_meta_count(a);
+}
+
+// The three metadata accessors follow snprintf semantics and return -1 when
+// the adapter index, key or entry index is absent.
+int lora_adapter_meta_val_str(void* state_ptr, int i, const char* key, char* buf, int buf_size) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    llama_adapter_lora* a = lora_at(state, i);
+    if (a == nullptr || buf_size <= 0) {
+        return -1;
+    }
+    return llama_adapter_meta_val_str(a, key, buf, (size_t) buf_size);
+}
+
+int lora_adapter_meta_key_by_index(void* state_ptr, int i, int j, char* buf, int buf_size) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    llama_adapter_lora* a = lora_at(state, i);
+    if (a == nullptr || buf_size <= 0) {
+        return -1;
+    }
+    return llama_adapter_meta_key_by_index(a, j, buf, (size_t) buf_size);
+}
+
+int lora_adapter_meta_val_str_by_index(void* state_ptr, int i, int j, char* buf, int buf_size) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    llama_adapter_lora* a = lora_at(state, i);
+    if (a == nullptr || buf_size <= 0) {
+        return -1;
+    }
+    return llama_adapter_meta_val_str_by_index(a, j, buf, (size_t) buf_size);
+}
+
+// Activated LoRA: the adapter only takes effect once the model has emitted its
+// invocation tokens. Returns the token count, or the negative of it when
+// max_tokens is too small, or -1 for an out-of-range adapter. A plain (non
+// activated) LoRA reports 0.
+int lora_adapter_alora_tokens(void* state_ptr, int i, int* tokens_out, int max_tokens) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    llama_adapter_lora* a = lora_at(state, i);
+    if (a == nullptr) {
+        return -1;
+    }
+    const int n = (int) llama_adapter_get_alora_n_invocation_tokens(a);
+    if (n <= 0) {
+        return 0;
+    }
+    if (tokens_out == nullptr || n > max_tokens) {
+        return -n;
+    }
+    const llama_token* src = llama_adapter_get_alora_invocation_tokens(a);
+    if (src == nullptr) {
+        return 0;
+    }
+    for (int j = 0; j < n; j++) {
+        tokens_out[j] = src[j];
+    }
+    return n;
+}
+
+// Control vector ("steering vector"): a direction added to the residual stream
+// of layers [il_start, il_end] to push generation toward or away from some
+// behaviour. data is n_embd x n_layers, starting from layer 1. Passing data =
+// NULL clears the active vector.
+int set_control_vector(void* state_ptr, const float* data, int len, int n_embd, int il_start, int il_end) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    if (data == nullptr || len <= 0) {
+        return llama_set_adapter_cvec(state->ctx, nullptr, 0, 0, 0, 0);
+    }
+    if (n_embd <= 0 || len % n_embd != 0) {
+        return -1;
+    }
+    return llama_set_adapter_cvec(state->ctx, data, (size_t) len, n_embd, il_start, il_end);
+}
