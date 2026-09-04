@@ -34,29 +34,60 @@ type LLama struct {
 	contextSize int
 }
 
+// New loads a GGUF model and creates a context for it. Call Free on the result
+// when done; without it the model stays resident until the process exits.
+//
+// For a sharded model, pass the first shard: llama.cpp infers the rest from
+// the "-00001-of-0000N.gguf" naming scheme. Use NewFromSplits when the shards
+// are named some other way.
 func New(model string, opts ...ModelOption) (*LLama, error) {
-	mo := NewModelOptions(opts...)
-	modelPath := C.CString(model)
-	defer C.free(unsafe.Pointer(modelPath))
-	loraBase := C.CString(mo.LoraBase)
-	defer C.free(unsafe.Pointer(loraBase))
-	loraAdapter := C.CString(mo.LoraAdapter)
-	defer C.free(unsafe.Pointer(loraAdapter))
+	return newModel([]string{model}, NewModelOptions(opts...))
+}
 
-	result := C.load_model(modelPath,
-		C.int(mo.ContextSize), C.int(mo.Seed),
-		C.bool(mo.F16Memory), C.bool(mo.MLock), C.bool(mo.Embeddings), C.bool(mo.MMap), C.bool(mo.LowVRAM),
-		C.int(mo.NGPULayers), C.int(mo.NBatch), C.CString(mo.MainGPU), C.CString(mo.TensorSplit), C.bool(mo.NUMA),
-		C.float(mo.FreqRopeBase), C.float(mo.FreqRopeScale),
-		loraAdapter, loraBase,
-	)
+// NewFromSplits loads a model from an explicit list of shard files, for models
+// whose filenames do not follow llama.cpp's shard naming scheme. Pass the
+// shards in order. For a single file, or shards that do follow the scheme, use
+// New instead.
+func NewFromSplits(paths []string, opts ...ModelOption) (*LLama, error) {
+	if len(paths) == 0 {
+		return nil, errors.New("llama: no model shards given")
+	}
+	return newModel(paths, NewModelOptions(opts...))
+}
 
-	if result == nil {
-		return nil, fmt.Errorf("failed loading model")
+func newModel(paths []string, mo ModelOptions) (*LLama, error) {
+	// Every C string allocated here is freed on the way out, whether the load
+	// succeeds or not.
+	var toFree []*C.char
+	cstr := func(s string) *C.char {
+		p := C.CString(s)
+		toFree = append(toFree, p)
+		return p
+	}
+	defer func() {
+		for _, p := range toFree {
+			C.free(unsafe.Pointer(p))
+		}
+	}()
+
+	cPaths := make([]*C.char, len(paths))
+	for i, p := range paths {
+		cPaths[i] = cstr(p)
 	}
 
-	ll := &LLama{state: result, contextSize: mo.ContextSize, embeddings: mo.Embeddings}
-	return ll, nil
+	result := C.load_model_splits(
+		(**C.char)(unsafe.Pointer(&cPaths[0])), C.int(len(cPaths)),
+		C.int(mo.ContextSize), C.int(mo.Seed),
+		C.bool(mo.F16Memory), C.bool(mo.MLock), C.bool(mo.Embeddings), C.bool(mo.MMap), C.bool(mo.LowVRAM),
+		C.int(mo.NGPULayers), C.int(mo.NBatch), cstr(mo.MainGPU), cstr(mo.TensorSplit), C.bool(mo.NUMA),
+		C.float(mo.FreqRopeBase), C.float(mo.FreqRopeScale),
+		cstr(mo.LoraAdapter), cstr(mo.LoraBase),
+	)
+	if result == nil {
+		return nil, fmt.Errorf("failed loading model %q", paths[0])
+	}
+
+	return &LLama{state: result, contextSize: mo.ContextSize, embeddings: mo.Embeddings}, nil
 }
 
 // Free releases the model and its context. The LLama must not be used
@@ -1887,6 +1918,59 @@ func (l *LLama) SetSequenceStateData(data []byte, destSeqID int32) error {
 	}
 	n := int64(C.state_seq_set_data(l.state, (*C.uchar)(unsafe.Pointer(&data[0])),
 		C.longlong(len(data)), C.int(destSeqID)))
+	if n == 0 {
+		return fmt.Errorf("llama: failed to restore state into sequence %d", destSeqID)
+	}
+	return nil
+}
+
+// SeqStateFlags selects how much of a sequence's state to capture.
+type SeqStateFlags uint32
+
+// Sequence state selectors, mirroring LLAMA_STATE_SEQ_FLAGS_*.
+const (
+	// SeqStateAll captures the whole sequence. This is what
+	// SequenceStateData uses.
+	SeqStateAll SeqStateFlags = 0
+	// SeqStatePartialOnly captures only the part of the cache the model
+	// still attends to. For a sliding-window model that is far smaller
+	// than the full sequence and is enough to resume from the current
+	// position, but it cannot reconstruct earlier context.
+	SeqStatePartialOnly SeqStateFlags = 1
+	// SeqStateOnDevice keeps the state in device memory instead of
+	// copying it to host memory.
+	SeqStateOnDevice SeqStateFlags = 2
+)
+
+// SequenceStateSizeWith returns the byte size SequenceStateDataWith will
+// produce for the given flags.
+func (l *LLama) SequenceStateSizeWith(seqID int32, flags SeqStateFlags) int64 {
+	return int64(C.state_seq_get_size_ext(l.state, C.int(seqID), C.uint(flags)))
+}
+
+// SequenceStateDataWith serializes a sequence, capturing only the part the
+// flags select. SeqStatePartialOnly on a sliding-window model produces a much
+// smaller checkpoint than SequenceStateData, at the cost of not being able to
+// reconstruct context the model has already slid past.
+func (l *LLama) SequenceStateDataWith(seqID int32, flags SeqStateFlags) ([]byte, error) {
+	return stateBuf(func(buf []byte) int64 {
+		var p *C.uchar
+		if len(buf) > 0 {
+			p = (*C.uchar)(unsafe.Pointer(&buf[0]))
+		}
+		return int64(C.state_seq_get_data_ext(l.state, p, C.longlong(len(buf)),
+			C.int(seqID), C.uint(flags)))
+	})
+}
+
+// SetSequenceStateDataWith restores state captured by SequenceStateDataWith.
+// The flags must match the ones it was captured with.
+func (l *LLama) SetSequenceStateDataWith(data []byte, destSeqID int32, flags SeqStateFlags) error {
+	if len(data) == 0 {
+		return errors.New("llama: empty sequence state data")
+	}
+	n := int64(C.state_seq_set_data_ext(l.state, (*C.uchar)(unsafe.Pointer(&data[0])),
+		C.longlong(len(data)), C.int(destSeqID), C.uint(flags)))
 	if n == 0 {
 		return fmt.Errorf("llama: failed to restore state into sequence %d", destSeqID)
 	}
