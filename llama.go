@@ -59,7 +59,16 @@ func New(model string, opts ...ModelOption) (*LLama, error) {
 	return ll, nil
 }
 
+// Free releases the model and its context. The LLama must not be used
+// afterwards.
+//
+// It also drops any token and abort callbacks registered for this model. Those
+// are keyed by the context pointer, and the allocator can hand the same address
+// to a later model, so leaving them behind would let a freed model's callbacks
+// fire for an unrelated one.
 func (l *LLama) Free() {
+	l.SetAbortCallback(nil)
+	setCallback(l.state, nil)
 	C.llama_binding_free_model(l.state)
 }
 
@@ -1588,6 +1597,190 @@ func SystemInfo() string {
 		return ""
 	}
 	return string(buf[:ret])
+}
+
+// LoadMode selects how a model file is brought into memory.
+type LoadMode int
+
+// Load modes, mirroring llama_load_mode.
+const (
+	LoadModeAuto      LoadMode = -1 // pick based on device capabilities
+	LoadModeNone      LoadMode = 0  // plain reads
+	LoadModeMmap      LoadMode = 1
+	LoadModeMlock     LoadMode = 2 // keep resident, never swapped
+	LoadModeMmapMlock LoadMode = 3
+	LoadModeDirectIO  LoadMode = 4 // bypass the page cache where supported
+)
+
+// String returns llama.cpp's name for the mode, which is also what
+// ParseLoadMode accepts.
+func (m LoadMode) String() string {
+	buf := make([]byte, 64)
+	ret := int(C.load_mode_name(C.int(m), (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+	if ret <= 0 || ret > len(buf) {
+		return fmt.Sprintf("LoadMode(%d)", int(m))
+	}
+	return string(buf[:ret])
+}
+
+// ParseLoadMode converts one of llama.cpp's load-mode names back to a
+// LoadMode. An unrecognised name yields LoadModeAuto.
+func ParseLoadMode(s string) LoadMode {
+	cs := C.CString(s)
+	defer C.free(unsafe.Pointer(cs))
+	return LoadMode(C.load_mode_from_str(cs))
+}
+
+// QuantizeOptions controls Quantize. The zero value is not useful — set at
+// least FileType.
+type QuantizeOptions struct {
+	// FileType is the llama_ftype to quantize to. Use FileTypeName to
+	// render one, and llama.cpp's quantize tool for the list of values.
+	FileType int
+	// Threads is the worker count; 0 or less lets the engine choose.
+	Threads int
+	// AllowRequantize permits quantizing tensors that are already
+	// quantized, which loses more precision than starting from f16/f32.
+	AllowRequantize bool
+	// QuantizeOutputTensor quantizes output.weight along with the rest.
+	// llama.cpp's default is true; leaving it false keeps that tensor at
+	// higher precision.
+	QuantizeOutputTensor bool
+	// Pure quantizes every tensor to FileType instead of letting the
+	// engine keep sensitive tensors at a higher precision.
+	Pure bool
+	// KeepSplit writes the same number of shards as the input had.
+	KeepSplit bool
+}
+
+// Quantize writes a requantized copy of the GGUF file at in to out.
+//
+// This is a file-level operation: it needs no loaded model, and it is the same
+// work llama.cpp's llama-quantize tool does. Expect it to take minutes and a
+// lot of memory for a large model.
+func Quantize(in, out string, opts QuantizeOptions) error {
+	cIn := C.CString(in)
+	defer C.free(unsafe.Pointer(cIn))
+	cOut := C.CString(out)
+	defer C.free(unsafe.Pointer(cOut))
+
+	ret := int(C.quantize_model(cIn, cOut, C.int(opts.FileType), C.int(opts.Threads),
+		C.bool(opts.AllowRequantize), C.bool(opts.QuantizeOutputTensor),
+		C.bool(opts.Pure), C.bool(opts.KeepSplit)))
+	if ret != 0 {
+		return fmt.Errorf("llama: failed to quantize %q to %q (%d)", in, out, ret)
+	}
+	return nil
+}
+
+// QuantizeDryRun runs the size calculation for a quantization without writing
+// anything. llama.cpp reports the projected size through the log, so pair this
+// with SetLogHandler to capture it.
+func QuantizeDryRun(in string, fileType, threads int) error {
+	cIn := C.CString(in)
+	defer C.free(unsafe.Pointer(cIn))
+
+	if ret := int(C.quantize_model_dry_run(cIn, C.int(fileType), C.int(threads))); ret != 0 {
+		return fmt.Errorf("llama: dry-run quantization of %q failed (%d)", in, ret)
+	}
+	return nil
+}
+
+// SaveModel writes the loaded model back out as a GGUF file. Its main use is
+// persisting a model after adapters or overrides have been applied.
+func (l *LLama) SaveModel(path string) error {
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+
+	C.save_model_to_file(l.state, cPath)
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("llama: model was not written to %q: %w", path, err)
+	}
+	return nil
+}
+
+// SplitPath builds the filename of one shard of a sharded GGUF model, given
+// the prefix and the shard numbering. It returns "" if the arguments do not
+// produce a valid path.
+func SplitPath(prefix string, splitNo, splitCount int) string {
+	cPrefix := C.CString(prefix)
+	defer C.free(unsafe.Pointer(cPrefix))
+
+	buf := make([]byte, 1024)
+	ret := int(C.build_split_path((*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)),
+		cPrefix, C.int(splitNo), C.int(splitCount)))
+	if ret <= 0 || ret > len(buf) {
+		return ""
+	}
+	return string(buf[:ret])
+}
+
+// SplitPrefix recovers the shared prefix from one shard's path — the inverse
+// of SplitPath. It returns "" when path does not follow the shard naming
+// scheme for the given numbering.
+func SplitPrefix(path string, splitNo, splitCount int) string {
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+
+	buf := make([]byte, 1024)
+	ret := int(C.build_split_prefix((*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)),
+		cPath, C.int(splitNo), C.int(splitCount)))
+	if ret <= 0 || ret > len(buf) {
+		return ""
+	}
+	return string(buf[:ret])
+}
+
+// MaxTensorBuftOverrides is the largest number of tensor buffer-type overrides
+// the engine accepts.
+func MaxTensorBuftOverrides() int { return int(C.max_tensor_buft_overrides()) }
+
+// BackendFree releases llama.cpp's global backend state. Call it once at
+// process shutdown, after every model has been Freed; using any part of this
+// package afterwards is undefined.
+func BackendFree() { C.backend_free() }
+
+var (
+	abortMu        sync.RWMutex
+	abortCallbacks = map[uintptr]func() bool{}
+)
+
+// SetAbortCallback installs fn as the interrupt check for this model's
+// decodes. The engine calls it repeatedly while a graph is running, and
+// returning true aborts the computation in progress — Decode then reports
+// status 2.
+//
+// This is the only way to stop work already handed to the backend: a token
+// callback can end generation between tokens, but not during one. Use it to
+// honour a context.Context deadline:
+//
+//	model.SetAbortCallback(func() bool { return ctx.Err() != nil })
+//
+// fn runs on the engine's compute thread and is called very often, so it must
+// be cheap and safe for concurrent use. Pass nil to remove it.
+func (l *LLama) SetAbortCallback(fn func() bool) {
+	abortMu.Lock()
+	defer abortMu.Unlock()
+
+	if fn == nil {
+		delete(abortCallbacks, uintptr(l.state))
+		C.set_abort_callback(l.state, C.bool(false))
+		return
+	}
+	abortCallbacks[uintptr(l.state)] = fn
+	C.set_abort_callback(l.state, C.bool(true))
+}
+
+//export goAbortCallback
+func goAbortCallback(statePtr unsafe.Pointer) C.uchar {
+	abortMu.RLock()
+	fn := abortCallbacks[uintptr(statePtr)]
+	abortMu.RUnlock()
+
+	if fn != nil && fn() {
+		return 1
+	}
+	return 0
 }
 
 // StateSize returns the number of bytes StateData will produce for the whole

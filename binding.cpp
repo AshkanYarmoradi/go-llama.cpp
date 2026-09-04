@@ -821,17 +821,27 @@ void* llama_allocate_params(const char *prompt, int seed, int threads, int token
     params->frequency_penalty = frequency_penalty;
     params->prompt = std::string(prompt);
     
-    // Parse logit bias if provided
+    // Parse logit bias if provided. std::stof throws on a malformed value, and
+    // an exception escaping into cgo aborts the process, so a bad bias string
+    // is reported and ignored instead.
     if (logit_bias != nullptr && logit_bias[0] != '\0') {
         std::stringstream ss(logit_bias);
         llama_token key;
         char sign;
         std::string value_str;
         if (ss >> key && ss >> sign && std::getline(ss, value_str) && (sign == '+' || sign == '-')) {
-            llama_logit_bias bias;
-            bias.token = key;
-            bias.bias = std::stof(value_str) * ((sign == '-') ? -1.0f : 1.0f);
-            params->logit_bias.push_back(bias);
+            try {
+                llama_logit_bias bias;
+                bias.token = key;
+                bias.bias = std::stof(value_str) * ((sign == '-') ? -1.0f : 1.0f);
+                params->logit_bias.push_back(bias);
+            } catch (const std::exception & e) {
+                fprintf(stderr, "%s: ignoring malformed logit_bias %s: %s\n",
+                        __func__, logit_bias, e.what());
+            }
+        } else {
+            fprintf(stderr, "%s: ignoring malformed logit_bias %s (expected \"token(+|-)value\")\n",
+                    __func__, logit_bias);
         }
     }
     
@@ -872,23 +882,32 @@ void* load_model(const char *fname, int n_ctx, int n_seed, bool memory_f16, bool
                            : mmap  ? LLAMA_LOAD_MODE_MMAP
                                    : LLAMA_LOAD_MODE_NONE;
     
-    // Parse main GPU
+    // Parse main GPU and tensor split. Both use std::stoi/std::stof, which
+    // throw on malformed input; an exception escaping into cgo aborts the
+    // process, so a bad value is reported and the default kept.
     if (maingpu != nullptr && maingpu[0] != '\0') {
-        model_params.main_gpu = std::stoi(maingpu);
+        try {
+            model_params.main_gpu = std::stoi(maingpu);
+        } catch (const std::exception & e) {
+            fprintf(stderr, "%s: ignoring malformed main_gpu %s: %s\n", __func__, maingpu, e.what());
+        }
     }
-    
-    // Parse tensor split
+
     static float tensor_split_values[128] = {0};
     if (tensorsplit != nullptr && tensorsplit[0] != '\0') {
         std::string arg_next = tensorsplit;
         const std::regex regex{R"([,/]+)"};
         std::sregex_token_iterator it{arg_next.begin(), arg_next.end(), regex, -1};
         std::vector<std::string> split_arg{it, {}};
-        
-        for (size_t i = 0; i < 128 && i < split_arg.size(); ++i) {
-            tensor_split_values[i] = std::stof(split_arg[i]);
+
+        try {
+            for (size_t i = 0; i < 128 && i < split_arg.size(); ++i) {
+                tensor_split_values[i] = std::stof(split_arg[i]);
+            }
+            model_params.tensor_split = tensor_split_values;
+        } catch (const std::exception & e) {
+            fprintf(stderr, "%s: ignoring malformed tensor_split %s: %s\n", __func__, tensorsplit, e.what());
         }
-        model_params.tensor_split = tensor_split_values;
     }
     
     // Load model
@@ -2090,3 +2109,136 @@ static_assert(GGML_LOG_LEVEL_INFO  == 2, "LogLevelInfo out of sync with llama.go
 static_assert(GGML_LOG_LEVEL_WARN  == 3, "LogLevelWarn out of sync with llama.go");
 static_assert(GGML_LOG_LEVEL_ERROR == 4, "LogLevelError out of sync with llama.go");
 static_assert(GGML_LOG_LEVEL_CONT  == 5, "LogLevelCont out of sync with llama.go");
+
+//
+// Model file utilities
+//
+// These operate on model files rather than on a loaded model, so most take no
+// binding state.
+//
+
+// Quantizes a GGUF file. ftype is a llama_ftype value; nthread <= 0 lets the
+// engine pick. Returns 0 on success, non-zero on failure.
+int quantize_model(const char* fname_in, const char* fname_out, int ftype, int nthread,
+                   bool allow_requantize, bool quantize_output_tensor,
+                   bool pure, bool keep_split) {
+    if (fname_in == nullptr || fname_out == nullptr) {
+        return 1;
+    }
+    llama_model_quantize_params params = llama_model_quantize_default_params();
+    params.ftype                  = (enum llama_ftype) ftype;
+    params.nthread                = nthread;
+    params.allow_requantize       = allow_requantize;
+    params.quantize_output_tensor = quantize_output_tensor;
+    params.pure                   = pure;
+    params.keep_split             = keep_split;
+    return (int) llama_model_quantize(fname_in, fname_out, &params);
+}
+
+// Reports the size a quantization would produce, without writing anything.
+// Returns 0 on success.
+int quantize_model_dry_run(const char* fname_in, int ftype, int nthread) {
+    if (fname_in == nullptr) {
+        return 1;
+    }
+    llama_model_quantize_params params = llama_model_quantize_default_params();
+    params.ftype   = (enum llama_ftype) ftype;
+    params.nthread = nthread;
+    params.dry_run = true;
+    return (int) llama_model_quantize(fname_in, fname_in, &params);
+}
+
+void save_model_to_file(void* state_ptr, const char* path) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    llama_model_save_to_file(state->model, path);
+}
+
+// Sharded ("split") GGUF paths. split_path builds the path of one shard from a
+// prefix; split_prefix recovers the prefix from a shard path. Both follow
+// snprintf-style semantics and return 0 when the input does not match the
+// expected naming scheme.
+int build_split_path(char* buf, int buf_size, const char* prefix, int split_no, int split_count) {
+    if (buf == nullptr || buf_size <= 0) {
+        return 0;
+    }
+    return llama_split_path(buf, (size_t) buf_size, prefix, split_no, split_count);
+}
+
+int build_split_prefix(char* buf, int buf_size, const char* split_path, int split_no, int split_count) {
+    if (buf == nullptr || buf_size <= 0) {
+        return 0;
+    }
+    return llama_split_prefix(buf, (size_t) buf_size, split_path, split_no, split_count);
+}
+
+// Model load modes (mmap, mlock, direct I/O). Names round-trip through
+// load_mode_from_str.
+//
+// The engine throws std::invalid_argument for an unrecognised name. A C++
+// exception crossing into cgo aborts the process, so it is caught here and
+// reported as LLAMA_LOAD_MODE_AUTO, which is the engine's own "decide for me"
+// value.
+int load_mode_from_str(const char* str) {
+    if (str == nullptr) {
+        return -1;  // LLAMA_LOAD_MODE_AUTO
+    }
+    try {
+        return (int) llama_load_mode_from_str(str);
+    } catch (const std::exception & e) {
+        fprintf(stderr, "%s: %s\n", __func__, e.what());
+        return -1;
+    }
+}
+
+int load_mode_name(int mode, char* buf, int buf_size) {
+    const char* name = llama_load_mode_name((enum llama_load_mode) mode);
+    if (name == nullptr) {
+        return -1;
+    }
+    return snprintf(buf, (size_t) buf_size, "%s", name);
+}
+
+// The name llama.cpp uses in GGUF for a well-known metadata key.
+int model_meta_key_str(int key, char* buf, int buf_size) {
+    const char* name = llama_model_meta_key_str((enum llama_model_meta_key) key);
+    if (name == nullptr) {
+        return -1;
+    }
+    return snprintf(buf, (size_t) buf_size, "%s", name);
+}
+
+int max_tensor_buft_overrides(void) {
+    return (int) llama_max_tensor_buft_overrides();
+}
+
+void backend_free(void) {
+    llama_backend_free();
+}
+
+//
+// Abort callback
+//
+// Lets a caller stop a decode that is already running on the backend, which is
+// otherwise uninterruptible. The engine polls this between graph nodes.
+
+extern "C" unsigned char goAbortCallback(void* state_ptr);
+
+static bool binding_abort_callback(void* data) {
+    return goAbortCallback(data) != 0;
+}
+
+void set_abort_callback(void* state_ptr, bool enable) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    if (enable) {
+        llama_set_abort_callback(state->ctx, binding_abort_callback, state_ptr);
+    } else {
+        llama_set_abort_callback(state->ctx, nullptr, nullptr);
+    }
+}
+
+static_assert(LLAMA_LOAD_MODE_AUTO       == -1, "LoadModeAuto out of sync with llama.go");
+static_assert(LLAMA_LOAD_MODE_NONE       ==  0, "LoadModeNone out of sync with llama.go");
+static_assert(LLAMA_LOAD_MODE_MMAP       ==  1, "LoadModeMmap out of sync with llama.go");
+static_assert(LLAMA_LOAD_MODE_MLOCK      ==  2, "LoadModeMlock out of sync with llama.go");
+static_assert(LLAMA_LOAD_MODE_MMAP_MLOCK ==  3, "LoadModeMmapMlock out of sync with llama.go");
+static_assert(LLAMA_LOAD_MODE_DIRECT_IO  ==  4, "LoadModeDirectIO out of sync with llama.go");
