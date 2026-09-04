@@ -2041,3 +2041,52 @@ int set_control_vector(void* state_ptr, const float* data, int len, int n_embd, 
     }
     return llama_set_adapter_cvec(state->ctx, data, (size_t) len, n_embd, il_start, il_end);
 }
+
+//
+// Log routing
+//
+// llama.cpp writes everything to stderr unless a callback is installed. The
+// bridge below forwards each record to Go, which dispatches it to whatever the
+// caller registered.
+//
+// The engine's logger state is global and, as llama.h notes, not thread safe,
+// so installing and clearing is serialized on the Go side.
+
+extern "C" void goLogCallback(int level, char* text);
+
+static void binding_log_callback(enum ggml_log_level level, const char* text, void* /*user_data*/) {
+    if (text == nullptr) {
+        return;
+    }
+    // cgo generates a non-const char* signature for exported Go functions, and
+    // the Go side only reads the string, so dropping the qualifier is safe.
+    goLogCallback((int) level, const_cast<char*>(text));
+}
+
+void set_log_callback(bool enable) {
+    if (enable) {
+        llama_log_set(binding_log_callback, nullptr);
+    } else {
+        // NULL restores llama.cpp's own stderr logging.
+        llama_log_set(nullptr, nullptr);
+    }
+}
+
+// Reports whether the engine is currently routing through this binding's
+// bridge. Comparing against binding_log_callback is what makes the answer
+// meaningful: llama_log_set(nullptr) does not clear the callback, it installs
+// llama.cpp's own stderr default, so llama_log_get never returns null and a
+// plain non-null test would always be true.
+bool has_log_callback(void) {
+    ggml_log_callback cb = nullptr;
+    void* user_data = nullptr;
+    llama_log_get(&cb, &user_data);
+    return cb == binding_log_callback;
+}
+
+static_assert(GGML_LOG_LEVEL_NONE  == 0, "LogLevelNone out of sync with llama.go");
+static_assert(GGML_LOG_LEVEL_DEBUG == 1, "LogLevelDebug out of sync with llama.go");
+static_assert(GGML_LOG_LEVEL_INFO  == 2, "LogLevelInfo out of sync with llama.go");
+static_assert(GGML_LOG_LEVEL_WARN  == 3, "LogLevelWarn out of sync with llama.go");
+static_assert(GGML_LOG_LEVEL_ERROR == 4, "LogLevelError out of sync with llama.go");
+static_assert(GGML_LOG_LEVEL_CONT  == 5, "LogLevelCont out of sync with llama.go");
