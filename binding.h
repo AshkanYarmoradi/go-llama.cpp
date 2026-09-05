@@ -180,7 +180,7 @@ void* sampler_init_temp_ext(float t, float delta, float exponent);
 void* sampler_init_xtc(float p, float t, int min_keep, unsigned int seed);
 void* sampler_init_top_n_sigma(float n);
 void* sampler_init_mirostat_v2(unsigned int seed, float tau, float eta);
-void* sampler_init_penalties(int last_n, float repeat, float freq, float present);
+void* sampler_init_penalties(void* state_ptr, int last_n, float repeat, float freq, float present);
 void* sampler_init_grammar(void* state_ptr, const char* grammar, const char* root);
 void* sampler_init_dry(void* state_ptr, float multiplier, float base, int allowed_length, int penalty_last_n);
 
