@@ -151,6 +151,38 @@ int get_vocab_fim_pad(void* state_ptr);
 int get_vocab_fim_rep(void* state_ptr);
 int get_vocab_fim_sep(void* state_ptr);
 
+
+// Vocabulary introspection. The *_str-style functions follow snprintf
+// semantics (see above) and return -1 for an out-of-range token.
+// get_vocab_token_text returns the raw stored vocabulary entry, which is not
+// the same as printable text -- use token_to_piece_str for output.
+// get_vocab_token_attr returns a bitmask of llama_token_attr values.
+int get_vocab_type(void* state_ptr);
+int get_vocab_token_text(void* state_ptr, int token, char* buf, int buf_size);
+float get_vocab_token_score(void* state_ptr, int token);
+int get_vocab_token_attr(void* state_ptr, int token);
+bool vocab_token_is_eog(void* state_ptr, int token);
+bool vocab_token_is_control(void* state_ptr, int token);
+bool get_vocab_add_sep(void* state_ptr);
+int get_vocab_suppress_tokens(void* state_ptr, int* tokens_out, int max_tokens);
+
+// Further model introspection. get_model_cls_label names the i-th output of a
+// classifier head; get_model_decoder_start_token returns -1 when the model is
+// not an encoder-decoder. ftype_name and flash_attn_type_name translate enum
+// values to strings and need no loaded model.
+int get_model_rope_type(void* state_ptr);
+int get_model_ftype(void* state_ptr);
+int get_model_decoder_start_token(void* state_ptr);
+int get_model_n_embd_inp(void* state_ptr);
+int get_model_n_embd_out(void* state_ptr);
+int get_model_n_layer_nextn(void* state_ptr);
+int get_model_n_cls_out(void* state_ptr);
+int get_model_cls_label(void* state_ptr, int i, char* buf, int buf_size);
+bool model_is_hybrid(void* state_ptr);
+bool model_is_diffusion(void* state_ptr);
+int ftype_name(int ftype, char* buf, int buf_size);
+int flash_attn_type_name(int type, char* buf, int buf_size);
+
 // Model architecture queries
 bool model_has_encoder(void* state_ptr);
 bool model_has_decoder(void* state_ptr);

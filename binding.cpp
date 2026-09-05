@@ -1421,3 +1421,210 @@ int chat_builtin_template_name(int i, char* buf, int buf_size) {
     }
     return snprintf(buf, (size_t) buf_size, "%s", names[(size_t) i]);
 }
+
+//
+// Vocabulary introspection
+//
+
+int get_vocab_type(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return (int) llama_vocab_type(llama_model_get_vocab(state->model));
+}
+
+// Returns the raw vocabulary entry for a token: the stored piece, before any
+// byte-fallback or SentencePiece space decoding. Use token_to_piece_str for
+// text that can be concatenated into output.
+int get_vocab_token_text(void* state_ptr, int token, char* buf, int buf_size) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab* vocab = llama_model_get_vocab(state->model);
+    if (token < 0 || token >= llama_vocab_n_tokens(vocab)) {
+        return -1;
+    }
+    const char* text = llama_vocab_get_text(vocab, token);
+    if (text == nullptr) {
+        return -1;
+    }
+    return snprintf(buf, (size_t) buf_size, "%s", text);
+}
+
+float get_vocab_token_score(void* state_ptr, int token) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab* vocab = llama_model_get_vocab(state->model);
+    if (token < 0 || token >= llama_vocab_n_tokens(vocab)) {
+        return 0.0f;
+    }
+    return llama_vocab_get_score(vocab, token);
+}
+
+int get_vocab_token_attr(void* state_ptr, int token) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab* vocab = llama_model_get_vocab(state->model);
+    if (token < 0 || token >= llama_vocab_n_tokens(vocab)) {
+        return 0;  // LLAMA_TOKEN_ATTR_UNDEFINED
+    }
+    return (int) llama_vocab_get_attr(vocab, token);
+}
+
+bool vocab_token_is_eog(void* state_ptr, int token) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab* vocab = llama_model_get_vocab(state->model);
+    if (token < 0 || token >= llama_vocab_n_tokens(vocab)) {
+        return false;
+    }
+    return llama_vocab_is_eog(vocab, token);
+}
+
+bool vocab_token_is_control(void* state_ptr, int token) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab* vocab = llama_model_get_vocab(state->model);
+    if (token < 0 || token >= llama_vocab_n_tokens(vocab)) {
+        return false;
+    }
+    return llama_vocab_is_control(vocab, token);
+}
+
+bool get_vocab_add_sep(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_vocab_get_add_sep(llama_model_get_vocab(state->model));
+}
+
+// Copies the vocabulary's suppress list into tokens_out. Returns the number of
+// suppressed tokens, or the negative of that count when max_tokens is too
+// small, matching the convention used by tokenize_text.
+int get_vocab_suppress_tokens(void* state_ptr, int* tokens_out, int max_tokens) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_vocab* vocab = llama_model_get_vocab(state->model);
+    int32_t n = 0;
+    const llama_token* toks = llama_vocab_get_suppress_tokens(vocab, &n);
+    if (toks == nullptr || n <= 0) {
+        return 0;
+    }
+    if (n > max_tokens) {
+        return -n;
+    }
+    for (int32_t i = 0; i < n; i++) {
+        tokens_out[i] = toks[i];
+    }
+    return n;
+}
+
+//
+// Further model introspection
+//
+
+int get_model_rope_type(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return (int) llama_model_rope_type(state->model);
+}
+
+int get_model_ftype(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return (int) llama_model_ftype(state->model);
+}
+
+int get_model_decoder_start_token(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_model_decoder_start_token(state->model);
+}
+
+int get_model_n_embd_inp(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_model_n_embd_inp(state->model);
+}
+
+int get_model_n_embd_out(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_model_n_embd_out(state->model);
+}
+
+int get_model_n_layer_nextn(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_model_n_layer_nextn(state->model);
+}
+
+int get_model_n_cls_out(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return (int) llama_model_n_cls_out(state->model);
+}
+
+int get_model_cls_label(void* state_ptr, int i, char* buf, int buf_size) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    if (i < 0 || (uint32_t) i >= llama_model_n_cls_out(state->model)) {
+        return -1;
+    }
+    const char* label = llama_model_cls_label(state->model, (uint32_t) i);
+    if (label == nullptr) {
+        return -1;
+    }
+    return snprintf(buf, (size_t) buf_size, "%s", label);
+}
+
+bool model_is_hybrid(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_model_is_hybrid(state->model);
+}
+
+bool model_is_diffusion(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_model_is_diffusion(state->model);
+}
+
+// Names for enum values, independent of any loaded model.
+int ftype_name(int ftype, char* buf, int buf_size) {
+    const char* name = llama_ftype_name((enum llama_ftype) ftype);
+    if (name == nullptr) {
+        return -1;
+    }
+    return snprintf(buf, (size_t) buf_size, "%s", name);
+}
+
+int flash_attn_type_name(int type, char* buf, int buf_size) {
+    const char* name = llama_flash_attn_type_name((enum llama_flash_attn_type) type);
+    if (name == nullptr) {
+        return -1;
+    }
+    return snprintf(buf, (size_t) buf_size, "%s", name);
+}
+
+//
+// Guards for the enum values mirrored in llama.go.
+//
+// The Go layer declares PoolingType, VocabType, TokenAttr and RopeType as
+// typed constants so callers get real names instead of bare ints. Those values
+// are copies, so if llama.cpp ever renumbers an enum the Go names would keep
+// compiling while silently decoding to the wrong thing. These assertions make
+// that a build failure here instead.
+
+static_assert(LLAMA_POOLING_TYPE_UNSPECIFIED == -1, "PoolingUnspecified out of sync with llama.go");
+static_assert(LLAMA_POOLING_TYPE_NONE        ==  0, "PoolingNone out of sync with llama.go");
+static_assert(LLAMA_POOLING_TYPE_MEAN        ==  1, "PoolingMean out of sync with llama.go");
+static_assert(LLAMA_POOLING_TYPE_CLS         ==  2, "PoolingCLS out of sync with llama.go");
+static_assert(LLAMA_POOLING_TYPE_LAST        ==  3, "PoolingLast out of sync with llama.go");
+static_assert(LLAMA_POOLING_TYPE_RANK        ==  4, "PoolingRank out of sync with llama.go");
+
+static_assert(LLAMA_VOCAB_TYPE_NONE   == 0, "VocabNone out of sync with llama.go");
+static_assert(LLAMA_VOCAB_TYPE_SPM    == 1, "VocabSPM out of sync with llama.go");
+static_assert(LLAMA_VOCAB_TYPE_BPE    == 2, "VocabBPE out of sync with llama.go");
+static_assert(LLAMA_VOCAB_TYPE_WPM    == 3, "VocabWPM out of sync with llama.go");
+static_assert(LLAMA_VOCAB_TYPE_UGM    == 4, "VocabUGM out of sync with llama.go");
+static_assert(LLAMA_VOCAB_TYPE_RWKV   == 5, "VocabRWKV out of sync with llama.go");
+static_assert(LLAMA_VOCAB_TYPE_PLAMO2 == 6, "VocabPLaMo2 out of sync with llama.go");
+
+static_assert(LLAMA_TOKEN_ATTR_UNDEFINED    == 0,      "TokenAttrUndefined out of sync with llama.go");
+static_assert(LLAMA_TOKEN_ATTR_UNKNOWN      == 1 << 0, "TokenAttrUnknown out of sync with llama.go");
+static_assert(LLAMA_TOKEN_ATTR_UNUSED       == 1 << 1, "TokenAttrUnused out of sync with llama.go");
+static_assert(LLAMA_TOKEN_ATTR_NORMAL       == 1 << 2, "TokenAttrNormal out of sync with llama.go");
+static_assert(LLAMA_TOKEN_ATTR_CONTROL      == 1 << 3, "TokenAttrControl out of sync with llama.go");
+static_assert(LLAMA_TOKEN_ATTR_USER_DEFINED == 1 << 4, "TokenAttrUserDefined out of sync with llama.go");
+static_assert(LLAMA_TOKEN_ATTR_BYTE         == 1 << 5, "TokenAttrByte out of sync with llama.go");
+static_assert(LLAMA_TOKEN_ATTR_NORMALIZED   == 1 << 6, "TokenAttrNormalized out of sync with llama.go");
+static_assert(LLAMA_TOKEN_ATTR_LSTRIP       == 1 << 7, "TokenAttrLStrip out of sync with llama.go");
+static_assert(LLAMA_TOKEN_ATTR_RSTRIP       == 1 << 8, "TokenAttrRStrip out of sync with llama.go");
+static_assert(LLAMA_TOKEN_ATTR_SINGLE_WORD  == 1 << 9, "TokenAttrSingleWord out of sync with llama.go");
+
+static_assert(LLAMA_ROPE_TYPE_NONE   == -1, "RopeNone out of sync with llama.go");
+static_assert(LLAMA_ROPE_TYPE_NORM   ==  0, "RopeNorm out of sync with llama.go");
+static_assert(LLAMA_ROPE_TYPE_NEOX   ==  2, "RopeNeox out of sync with llama.go");
+static_assert(LLAMA_ROPE_TYPE_MROPE  ==  8, "RopeMrope out of sync with llama.go");
+static_assert(LLAMA_ROPE_TYPE_VISION == 24, "RopeVision out of sync with llama.go");
+static_assert(LLAMA_ROPE_TYPE_IMROPE == 40, "RopeImrope out of sync with llama.go");
