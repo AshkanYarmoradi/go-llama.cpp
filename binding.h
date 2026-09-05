@@ -38,6 +38,24 @@ void* load_model(const char *fname,
                  const char *lora, const char *lora_base
                  );
 
+
+// Loads a model from an explicit list of shards. Only needed when the shard
+// filenames do not follow llama.cpp's own naming scheme; otherwise load_model
+// with the first shard is enough.
+void* load_model_splits(const char **paths, int n_paths,
+                        int n_ctx, int n_seed, bool memory_f16, bool mlock,
+                        bool embeddings, bool mmap, bool low_vram, int n_gpu_layers, int n_batch,
+                        const char *maingpu, const char *tensorsplit, bool numa, float rope_freq_base,
+                        float rope_freq_scale, const char *lora, const char *lora_base);
+
+// Sequence state with a llama_state_seq_flags mask, which lets a caller
+// capture part of a sequence rather than all of it. Same buffer contract as
+// the plain state_seq_* functions.
+long long state_seq_get_size_ext(void* state_ptr, int seq_id, unsigned int flags);
+long long state_seq_get_data_ext(void* state_ptr, unsigned char* buf, long long buf_size,
+                                 int seq_id, unsigned int flags);
+long long state_seq_set_data_ext(void* state_ptr, const unsigned char* buf, long long buf_size,
+                                 int dest_seq_id, unsigned int flags);
 int get_embeddings(void* params_ptr, void* state_pr, float * res_embeddings);
 
 int get_token_embeddings(void* params_ptr, void* state_pr, int *tokens, int tokenSize, float * res_embeddings);

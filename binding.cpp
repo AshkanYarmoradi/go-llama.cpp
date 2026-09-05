@@ -848,10 +848,21 @@ void* llama_allocate_params(const char *prompt, int seed, int threads, int token
     return params;
 }
 
-void* load_model(const char *fname, int n_ctx, int n_seed, bool memory_f16, bool mlock, 
-                 bool embeddings, bool mmap, bool low_vram, int n_gpu_layers, int n_batch, 
-                 const char *maingpu, const char *tensorsplit, bool numa, float rope_freq_base, 
+// Shared implementation. paths holds n_paths GGUF files: one for an ordinary
+// model, or every shard of a model whose filenames do not follow llama.cpp's
+// "-00001-of-0000N.gguf" convention (which it can otherwise infer from the
+// first shard alone).
+static void* load_model_impl(const char **paths, int n_paths,
+                 int n_ctx, int n_seed, bool memory_f16, bool mlock,
+                 bool embeddings, bool mmap, bool low_vram, int n_gpu_layers, int n_batch,
+                 const char *maingpu, const char *tensorsplit, bool numa, float rope_freq_base,
                  float rope_freq_scale, const char *lora, const char *lora_base) {
+
+    if (paths == nullptr || n_paths <= 0 || paths[0] == nullptr) {
+        fprintf(stderr, "%s: error: no model path given\n", __func__);
+        return nullptr;
+    }
+    const char *fname = paths[0];
 
     // These parameters are retained for C ABI stability with the Go layer but
     // are no longer consumed by llama.cpp: the seed is applied when the sampler
@@ -911,7 +922,9 @@ void* load_model(const char *fname, int n_ctx, int n_seed, bool memory_f16, bool
     }
     
     // Load model
-    llama_model * model = llama_model_load_from_file(fname, model_params);
+    llama_model * model = n_paths == 1
+        ? llama_model_load_from_file(fname, model_params)
+        : llama_model_load_from_splits(paths, (size_t) n_paths, model_params);
     if (model == nullptr) {
         fprintf(stderr, "%s: error: failed to load model '%s'\n", __func__, fname);
         return nullptr;
@@ -962,6 +975,29 @@ void* load_model(const char *fname, int n_ctx, int n_seed, bool memory_f16, bool
     state->ctx = ctx;
     
     return state;
+}
+
+void* load_model(const char *fname, int n_ctx, int n_seed, bool memory_f16, bool mlock,
+                 bool embeddings, bool mmap, bool low_vram, int n_gpu_layers, int n_batch,
+                 const char *maingpu, const char *tensorsplit, bool numa, float rope_freq_base,
+                 float rope_freq_scale, const char *lora, const char *lora_base) {
+    const char *paths[1] = { fname };
+    return load_model_impl(paths, 1, n_ctx, n_seed, memory_f16, mlock, embeddings, mmap,
+                           low_vram, n_gpu_layers, n_batch, maingpu, tensorsplit, numa,
+                           rope_freq_base, rope_freq_scale, lora, lora_base);
+}
+
+// Loads a model from an explicit list of shards. Only needed when the shard
+// filenames do not follow llama.cpp's own naming scheme; otherwise load_model
+// with the first shard is enough.
+void* load_model_splits(const char **paths, int n_paths,
+                        int n_ctx, int n_seed, bool memory_f16, bool mlock,
+                        bool embeddings, bool mmap, bool low_vram, int n_gpu_layers, int n_batch,
+                        const char *maingpu, const char *tensorsplit, bool numa, float rope_freq_base,
+                        float rope_freq_scale, const char *lora, const char *lora_base) {
+    return load_model_impl(paths, n_paths, n_ctx, n_seed, memory_f16, mlock, embeddings, mmap,
+                           low_vram, n_gpu_layers, n_batch, maingpu, tensorsplit, numa,
+                           rope_freq_base, rope_freq_scale, lora, lora_base);
 }
 
 // Model info functions
@@ -2242,3 +2278,41 @@ static_assert(LLAMA_LOAD_MODE_MMAP       ==  1, "LoadModeMmap out of sync with l
 static_assert(LLAMA_LOAD_MODE_MLOCK      ==  2, "LoadModeMlock out of sync with llama.go");
 static_assert(LLAMA_LOAD_MODE_MMAP_MLOCK ==  3, "LoadModeMmapMlock out of sync with llama.go");
 static_assert(LLAMA_LOAD_MODE_DIRECT_IO  ==  4, "LoadModeDirectIO out of sync with llama.go");
+
+//
+// Sequence state with flags
+//
+// The plain state_seq_* functions above capture a whole sequence. These take a
+// llama_state_seq_flags mask, which lets a caller capture only part of it —
+// LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY, for instance, saves just the
+// sliding-window part of an SWA cache, which is far smaller than the whole
+// sequence and is all that is needed to resume from the current position.
+//
+
+long long state_seq_get_size_ext(void* state_ptr, int seq_id, unsigned int flags) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return (long long) llama_state_seq_get_size_ext(state->ctx, seq_id, flags);
+}
+
+long long state_seq_get_data_ext(void* state_ptr, unsigned char* buf, long long buf_size,
+                                 int seq_id, unsigned int flags) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const size_t need = llama_state_seq_get_size_ext(state->ctx, seq_id, flags);
+    if (buf_size < 0 || (size_t) buf_size < need) {
+        return -(long long) need;
+    }
+    return (long long) llama_state_seq_get_data_ext(state->ctx, buf, (size_t) buf_size, seq_id, flags);
+}
+
+long long state_seq_set_data_ext(void* state_ptr, const unsigned char* buf, long long buf_size,
+                                 int dest_seq_id, unsigned int flags) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    if (buf == nullptr || buf_size <= 0) {
+        return 0;
+    }
+    return (long long) llama_state_seq_set_data_ext(state->ctx, buf, (size_t) buf_size, dest_seq_id, flags);
+}
+
+static_assert(LLAMA_STATE_SEQ_FLAGS_NONE         == 0, "SeqStateAll out of sync with llama.go");
+static_assert(LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY == 1, "SeqStatePartialOnly out of sync with llama.go");
+static_assert(LLAMA_STATE_SEQ_FLAGS_ON_DEVICE    == 2, "SeqStateOnDevice out of sync with llama.go");

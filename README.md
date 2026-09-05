@@ -31,8 +31,10 @@ several rounds of breaking API changes. This fork tracks upstream: a Dependabot
 job bumps the llama.cpp submodule daily, and the binding is updated to match
 when the engine's API moves.
 
-It targets the modern llama.cpp C API. Functions upstream marks deprecated are
-deliberately not exposed — the binding wraps the replacement instead.
+It targets the modern llama.cpp C API and covers **186 of its 200 live
+functions**; the 14 exclusions are deliberate and listed in
+[docs/engine-coverage.md](docs/engine-coverage.md). Functions upstream marks
+deprecated are not exposed — the binding wraps the replacement instead.
 
 ---
 

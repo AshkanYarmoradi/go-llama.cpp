@@ -1321,6 +1321,64 @@ how much is 2+2?
 			}
 		})
 	})
+
+	Context("Sharded loading and partial sequence state", func() {
+		It("rejects an empty shard list", func() {
+			model, err := NewFromSplits(nil)
+			Expect(err).To(HaveOccurred())
+			Expect(model).To(BeNil())
+		})
+
+		It("reports an error for shards that do not exist", func() {
+			model, err := NewFromSplits([]string{"no-such-shard-1.gguf", "no-such-shard-2.gguf"})
+			Expect(err).To(HaveOccurred())
+			Expect(model).To(BeNil())
+		})
+
+		It("loads a single-file model through the splits path", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			// One shard is the degenerate case and must behave like New.
+			model, err := NewFromSplits([]string{testModelPath}, EnableF16Memory, SetContext(128), SetMMap(true))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+			Expect(model.GetModelInfo().VocabSize).To(BeNumerically(">", 0))
+		})
+
+		It("captures a smaller checkpoint with partial-only state", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			tokens := model.Tokenize("The capital of France is", true, false)
+			batch := NewBatch(len(tokens), 1)
+			defer batch.Free()
+			for i, tok := range tokens {
+				Expect(batch.Add(tok, int32(i), []int32{0}, i == len(tokens)-1)).To(Succeed())
+			}
+			Expect(model.Decode(batch)).To(Equal(0))
+
+			full := model.SequenceStateSizeWith(0, SeqStateAll)
+			Expect(full).To(Equal(model.SequenceStateSize(0)), "SeqStateAll must match the default")
+			Expect(full).To(BeNumerically(">", int64(0)))
+
+			partial := model.SequenceStateSizeWith(0, SeqStatePartialOnly)
+			Expect(partial).To(BeNumerically(">", int64(0)))
+			Expect(partial).To(BeNumerically("<=", full))
+
+			data, err := model.SequenceStateDataWith(0, SeqStateAll)
+			Expect(err).ToNot(HaveOccurred())
+			model.MemoryClear(true)
+			Expect(model.SetSequenceStateDataWith(data, 0, SeqStateAll)).To(Succeed())
+			Expect(model.MemorySeqPosMax(0)).To(Equal(int32(len(tokens) - 1)))
+
+			Expect(model.SetSequenceStateDataWith(nil, 0, SeqStateAll)).To(HaveOccurred())
+		})
+	})
 	Context("Inferencing tests with GPU (using "+testModelPath+") ", Label("gpu"), func() {
 		getModel := func() (*LLama, error) {
 			model, err := New(
