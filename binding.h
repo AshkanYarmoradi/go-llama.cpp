@@ -251,6 +251,30 @@ bool model_is_recurrent(void* state_ptr);
 // System info
 int get_system_info(char* buf, int buf_size);
 
+// Model file utilities. quantize_model writes a requantized copy and returns 0
+// on success; quantize_model_dry_run reports the resulting size without
+// writing. The split helpers translate between a sharded-GGUF prefix and one
+// shard's path, returning 0 when the input does not match the naming scheme.
+// The *_name functions follow snprintf semantics.
+int quantize_model(const char* fname_in, const char* fname_out, int ftype, int nthread,
+                   bool allow_requantize, bool quantize_output_tensor,
+                   bool pure, bool keep_split);
+int quantize_model_dry_run(const char* fname_in, int ftype, int nthread);
+void save_model_to_file(void* state_ptr, const char* path);
+int build_split_path(char* buf, int buf_size, const char* prefix, int split_no, int split_count);
+int build_split_prefix(char* buf, int buf_size, const char* split_path, int split_no, int split_count);
+int load_mode_from_str(const char* str);
+int load_mode_name(int mode, char* buf, int buf_size);
+int model_meta_key_str(int key, char* buf, int buf_size);
+int max_tensor_buft_overrides(void);
+void backend_free(void);
+
+// Abort callback. set_abort_callback(state, true) makes the engine poll
+// goAbortCallback between graph nodes so a running decode can be stopped;
+// passing false detaches it.
+extern unsigned char goAbortCallback(void* state_ptr);
+void set_abort_callback(void* state_ptr, bool enable);
+
 // Backend capability queries. These reflect how the llama.cpp library was
 // compiled and require no loaded model.
 bool backend_supports_mmap(void);

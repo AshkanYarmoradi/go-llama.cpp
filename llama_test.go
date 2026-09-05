@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/AshkanYarmoradi/go-llama.cpp"
 	. "github.com/AshkanYarmoradi/go-llama.cpp"
@@ -1211,6 +1212,113 @@ how much is 2+2?
 			mu.Lock()
 			defer mu.Unlock()
 			Expect(count).To(Equal(afterFirst), "handler was called after being removed")
+		})
+	})
+
+	Context("Model file utilities", func() {
+		It("round-trips load mode names", func() {
+			for _, m := range []LoadMode{LoadModeNone, LoadModeMmap, LoadModeMlock, LoadModeMmapMlock, LoadModeDirectIO} {
+				name := m.String()
+				Expect(name).ToNot(BeEmpty())
+				Expect(ParseLoadMode(name)).To(Equal(m), "round trip failed for %s", name)
+			}
+			// An unrecognised name falls back to auto-detection.
+			Expect(ParseLoadMode("definitely-not-a-load-mode")).To(Equal(LoadModeAuto))
+		})
+
+		It("builds and parses sharded model paths", func() {
+			path := SplitPath("/models/llama", 2, 5)
+			Expect(path).ToNot(BeEmpty())
+			Expect(path).To(ContainSubstring("llama"))
+
+			// SplitPrefix is the inverse.
+			Expect(SplitPrefix(path, 2, 5)).To(Equal("/models/llama"))
+
+			// A path that does not follow the scheme yields nothing.
+			Expect(SplitPrefix("/models/plain.gguf", 2, 5)).To(BeEmpty())
+		})
+
+		It("reports the tensor override limit", func() {
+			Expect(MaxTensorBuftOverrides()).To(BeNumerically(">", 0))
+		})
+
+		It("reports an error for an unreadable quantization input", func() {
+			err := Quantize(filepath.Join(GinkgoT().TempDir(), "missing.gguf"),
+				filepath.Join(GinkgoT().TempDir(), "out.gguf"),
+				QuantizeOptions{FileType: 2})
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("aborts a decode from the callback", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			tokens := model.Tokenize("The capital of France is", true, false)
+			Expect(tokens).ToNot(BeEmpty())
+
+			var calls int32
+			model.SetAbortCallback(func() bool {
+				atomic.AddInt32(&calls, 1)
+				return true // abort immediately
+			})
+
+			batch := NewBatch(len(tokens), 1)
+			defer batch.Free()
+			for i, tok := range tokens {
+				Expect(batch.Add(tok, int32(i), []int32{0}, i == len(tokens)-1)).To(Succeed())
+			}
+
+			// llama.cpp reports 2 for an aborted decode.
+			Expect(model.Decode(batch)).To(Equal(2))
+			Expect(atomic.LoadInt32(&calls)).To(BeNumerically(">", 0))
+
+			// With the callback removed the same batch decodes normally.
+			model.SetAbortCallback(nil)
+			model.MemoryClear(true)
+			Expect(model.Decode(batch)).To(Equal(0))
+		})
+	})
+
+	// These inputs used to abort the process: llama.cpp and the binding's own
+	// parsing both throw C++ exceptions on malformed values, and an exception
+	// crossing into cgo calls std::terminate. Each must now surface as an
+	// ordinary Go error or a documented fallback.
+	Context("Malformed input does not crash the process", func() {
+		It("falls back to auto for an unknown load mode name", func() {
+			Expect(ParseLoadMode("definitely-not-a-load-mode")).To(Equal(LoadModeAuto))
+			Expect(ParseLoadMode("")).To(Equal(LoadModeAuto))
+		})
+
+		It("ignores a non-numeric main GPU", func() {
+			model, err := New("not-existing", SetMainGPU("not-a-number"))
+			Expect(err).To(HaveOccurred())
+			Expect(model).To(BeNil())
+		})
+
+		It("ignores a non-numeric tensor split", func() {
+			model, err := New("not-existing", SetTensorSplit("a,b,c"))
+			Expect(err).To(HaveOccurred())
+			Expect(model).To(BeNil())
+		})
+
+		It("ignores a malformed logit bias", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			for _, bad := range []string{"5+notanumber", "notatoken+1", "+", "garbage"} {
+				out, err := model.Predict("The capital of France is", SetTokens(4), SetLogitBias(bad))
+				Expect(err).ToNot(HaveOccurred(), "logit bias %q", bad)
+				Expect(out).ToNot(BeEmpty())
+			}
 		})
 	})
 	Context("Inferencing tests with GPU (using "+testModelPath+") ", Label("gpu"), func() {
