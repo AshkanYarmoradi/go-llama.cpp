@@ -1,7 +1,37 @@
 version: 2
 
 updates:
+  # The llama.cpp engine. Daily, because upstream moves fast and a bump that
+  # breaks the binding should surface within a day rather than a month's worth
+  # of commits later.
   - package-ecosystem: gitsubmodule
-    schedule:
-        interval: "daily"
     directory: /
+    schedule:
+      interval: daily
+    commit-message:
+      prefix: build
+
+  # Go dependencies (the test toolchain: Ginkgo, Gomega).
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+    groups:
+      go-test-deps:
+        patterns:
+          - "github.com/onsi/*"
+
+  # GitHub Actions. Workflows pin actions by commit SHA, so without this they
+  # would never be updated at all.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns:
+          - "*"
