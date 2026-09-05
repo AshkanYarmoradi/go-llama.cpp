@@ -1628,3 +1628,130 @@ static_assert(LLAMA_ROPE_TYPE_NEOX   ==  2, "RopeNeox out of sync with llama.go"
 static_assert(LLAMA_ROPE_TYPE_MROPE  ==  8, "RopeMrope out of sync with llama.go");
 static_assert(LLAMA_ROPE_TYPE_VISION == 24, "RopeVision out of sync with llama.go");
 static_assert(LLAMA_ROPE_TYPE_IMROPE == 40, "RopeImrope out of sync with llama.go");
+
+//
+// State and session persistence
+//
+// The whole-context helpers (load_state / save_state) round-trip everything.
+// These add the two things they cannot express: a session file that carries
+// its own token list, and per-sequence state, which is what lets a server
+// checkpoint one conversation slot without disturbing the others.
+//
+
+long long state_get_size(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return (long long) llama_state_get_size(state->ctx);
+}
+
+// Serializes the whole context into buf. Returns the number of bytes written,
+// or the negative of the required size when buf_size is too small.
+long long state_get_data(void* state_ptr, unsigned char* buf, long long buf_size) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const size_t need = llama_state_get_size(state->ctx);
+    if (buf_size < 0 || (size_t) buf_size < need) {
+        return -(long long) need;
+    }
+    return (long long) llama_state_get_data(state->ctx, buf, (size_t) buf_size);
+}
+
+// Restores a context previously serialized by state_get_data. Returns the
+// number of bytes consumed, or 0 on failure.
+long long state_set_data(void* state_ptr, const unsigned char* buf, long long buf_size) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    if (buf == nullptr || buf_size <= 0) {
+        return 0;
+    }
+    return (long long) llama_state_set_data(state->ctx, buf, (size_t) buf_size);
+}
+
+// Session files carry the prompt tokens alongside the context state, so a
+// process can resume a conversation it did not itself start.
+bool state_save_file(void* state_ptr, const char* path, const int* tokens, int n_tokens) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    if (n_tokens < 0) {
+        return false;
+    }
+    return llama_state_save_file(state->ctx, path, (const llama_token*) tokens, (size_t) n_tokens);
+}
+
+// Loads a session file into the context. Returns the number of tokens read,
+// or -1 on failure -- including when max_tokens is smaller than the file's
+// token count, which the engine rejects outright rather than truncating.
+int state_load_file(void* state_ptr, const char* path, int* tokens_out, int max_tokens) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    if (max_tokens < 0) {
+        return -1;
+    }
+    size_t n_out = 0;
+    if (!llama_state_load_file(state->ctx, path, (llama_token*) tokens_out,
+                               (size_t) max_tokens, &n_out)) {
+        return -1;
+    }
+    return (int) n_out;
+}
+
+long long state_seq_get_size(void* state_ptr, int seq_id) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return (long long) llama_state_seq_get_size(state->ctx, seq_id);
+}
+
+// As state_get_data, but for a single sequence.
+long long state_seq_get_data(void* state_ptr, unsigned char* buf, long long buf_size, int seq_id) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const size_t need = llama_state_seq_get_size(state->ctx, seq_id);
+    if (buf_size < 0 || (size_t) buf_size < need) {
+        return -(long long) need;
+    }
+    return (long long) llama_state_seq_get_data(state->ctx, buf, (size_t) buf_size, seq_id);
+}
+
+// Restores a sequence into dest_seq_id, which need not be the id it was saved
+// from. Returns the number of bytes consumed, or 0 on failure.
+long long state_seq_set_data(void* state_ptr, const unsigned char* buf, long long buf_size, int dest_seq_id) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    if (buf == nullptr || buf_size <= 0) {
+        return 0;
+    }
+    return (long long) llama_state_seq_set_data(state->ctx, buf, (size_t) buf_size, dest_seq_id);
+}
+
+bool state_seq_save_file(void* state_ptr, const char* path, int seq_id, const int* tokens, int n_tokens) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    if (n_tokens < 0) {
+        return false;
+    }
+    return llama_state_seq_save_file(state->ctx, path, seq_id,
+                                     (const llama_token*) tokens, (size_t) n_tokens) > 0;
+}
+
+// Reports how many tokens a per-sequence state file holds, without loading any
+// state. Returns -1 if the file cannot be read. There is no equivalent probe
+// for whole-session files: llama_state_load_file has no such mode, so callers
+// must size that buffer from the context.
+int state_seq_file_token_count(void* state_ptr, const char* path) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    size_t n_out = 0;
+    if (llama_state_seq_load_file(state->ctx, path, 0, nullptr, 0, &n_out) == 0) {
+        return -1;
+    }
+    return (int) n_out;
+}
+
+// Loads a per-sequence file into dest_seq_id, which need not be the id it was
+// saved from. Returns the number of tokens read, or -1 on failure — including
+// when max_tokens is smaller than the file's token count, which the engine
+// treats as an error rather than a truncation. Size the buffer with
+// state_seq_file_token_count first.
+int state_seq_load_file(void* state_ptr, const char* path, int dest_seq_id,
+                        int* tokens_out, int max_tokens) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    if (tokens_out == nullptr || max_tokens < 0) {
+        return -1;
+    }
+    size_t n_out = 0;
+    if (llama_state_seq_load_file(state->ctx, path, dest_seq_id, (llama_token*) tokens_out,
+                                  (size_t) max_tokens, &n_out) == 0) {
+        return -1;
+    }
+    return (int) n_out;
+}

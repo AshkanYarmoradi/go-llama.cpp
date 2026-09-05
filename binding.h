@@ -94,6 +94,29 @@ bool memory_seq_rm(void* state_ptr, int seq_id, int p0, int p1);
 void memory_seq_cp(void* state_ptr, int src, int dst, int p0, int p1);
 void memory_seq_keep(void* state_ptr, int seq_id);
 
+
+// State and session persistence. The load_state / save_state pair above
+// round-trips a whole context as raw bytes. These add what it cannot express:
+// a session file that carries its own token list, and per-sequence state, so a
+// server can checkpoint one conversation slot without touching the others.
+//
+// The state_*_get_data functions return the bytes written, or the negative of
+// the required size when the buffer is too small. The file loaders return the
+// token count, or -1 on failure -- a buffer smaller than the file's token
+// count is a failure, not a truncation, so probe the size first.
+long long state_get_size(void* state_ptr);
+long long state_get_data(void* state_ptr, unsigned char* buf, long long buf_size);
+long long state_set_data(void* state_ptr, const unsigned char* buf, long long buf_size);
+bool state_save_file(void* state_ptr, const char* path, const int* tokens, int n_tokens);
+int state_load_file(void* state_ptr, const char* path, int* tokens_out, int max_tokens);
+long long state_seq_get_size(void* state_ptr, int seq_id);
+long long state_seq_get_data(void* state_ptr, unsigned char* buf, long long buf_size, int seq_id);
+long long state_seq_set_data(void* state_ptr, const unsigned char* buf, long long buf_size, int dest_seq_id);
+bool state_seq_save_file(void* state_ptr, const char* path, int seq_id, const int* tokens, int n_tokens);
+int state_seq_file_token_count(void* state_ptr, const char* path);
+int state_seq_load_file(void* state_ptr, const char* path, int dest_seq_id,
+                        int* tokens_out, int max_tokens);
+
 // Model info functions
 int get_model_n_vocab(void* state_ptr);
 int get_model_n_ctx_train(void* state_ptr);
