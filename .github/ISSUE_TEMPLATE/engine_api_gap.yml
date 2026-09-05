@@ -1,0 +1,36 @@
+name: Missing llama.cpp API
+description: A function in llama.h that the Go binding does not expose
+labels: [enhancement, engine-parity]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This binding aims to cover llama.cpp's C API. Functions upstream marks
+        `DEPRECATED` are deliberately left out — if you need one of those, the
+        request is for whatever replaced it.
+
+  - type: input
+    id: symbol
+    attributes:
+      label: Engine function
+      description: The `llama_*` name as it appears in `llama.cpp/include/llama.h`.
+      placeholder: llama_sampler_init_infill
+    validations:
+      required: true
+
+  - type: textarea
+    id: usecase
+    attributes:
+      label: What you would do with it
+      description: >
+        What you are trying to build. This decides the shape of the Go API —
+        the binding does not mirror C signatures one-to-one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: shape
+    attributes:
+      label: Suggested Go API
+      description: Optional. What the call would look like from Go.
+      render: go
