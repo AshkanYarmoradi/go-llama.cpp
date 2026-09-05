@@ -904,6 +904,12 @@ void* load_model(const char *fname, int n_ctx, int n_seed, bool memory_f16, bool
     ctx_params.n_batch = n_batch;
     ctx_params.n_ubatch = n_batch;
     ctx_params.embeddings = embeddings;
+
+    // llama_context_default_params sets no_perf = true, which makes the engine
+    // skip its own timing calls and leaves llama_perf_context reporting zeros.
+    // The binding exposes those counters through Perf(), so enable them; the
+    // cost is a couple of clock reads per decode.
+    ctx_params.no_perf = false;
     
     if (rope_freq_base != 0.0f) {
         ctx_params.rope_freq_base = rope_freq_base;
@@ -1227,4 +1233,150 @@ int apply_chat_template(void* state_ptr, const char* tmpl, const char* messages_
     (void)result;
     (void)result_size;
     return -1;
+}
+
+//
+// Context runtime introspection and control
+//
+// The engine may clamp or round the values requested through llama_context_params,
+// so these report what the context actually uses rather than what was asked for.
+//
+
+int context_n_ctx(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return (int) llama_n_ctx(state->ctx);
+}
+
+int context_n_ctx_seq(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return (int) llama_n_ctx_seq(state->ctx);
+}
+
+int context_n_batch(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return (int) llama_n_batch(state->ctx);
+}
+
+int context_n_ubatch(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return (int) llama_n_ubatch(state->ctx);
+}
+
+int context_n_seq_max(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return (int) llama_n_seq_max(state->ctx);
+}
+
+int context_n_rs_seq(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return (int) llama_n_rs_seq(state->ctx);
+}
+
+int context_pooling_type(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return (int) llama_pooling_type(state->ctx);
+}
+
+int context_n_threads(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_n_threads(state->ctx);
+}
+
+int context_n_threads_batch(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_n_threads_batch(state->ctx);
+}
+
+void context_set_n_threads(void* state_ptr, int n_threads, int n_threads_batch) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    llama_set_n_threads(state->ctx, n_threads, n_threads_batch);
+}
+
+void context_set_embeddings(void* state_ptr, bool embeddings) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    llama_set_embeddings(state->ctx, embeddings);
+}
+
+void context_set_causal_attn(void* state_ptr, bool causal_attn) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    llama_set_causal_attn(state->ctx, causal_attn);
+}
+
+void context_synchronize(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    llama_synchronize(state->ctx);
+}
+
+//
+// KV-cache (memory) operations not already exposed
+//
+
+void memory_seq_add(void* state_ptr, int seq_id, int p0, int p1, int delta) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    llama_memory_seq_add(llama_get_memory(state->ctx), seq_id, p0, p1, delta);
+}
+
+void memory_seq_div(void* state_ptr, int seq_id, int p0, int p1, int d) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    llama_memory_seq_div(llama_get_memory(state->ctx), seq_id, p0, p1, d);
+}
+
+int memory_seq_pos_min(void* state_ptr, int seq_id) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_memory_seq_pos_min(llama_get_memory(state->ctx), seq_id);
+}
+
+int memory_seq_pos_max(void* state_ptr, int seq_id) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_memory_seq_pos_max(llama_get_memory(state->ctx), seq_id);
+}
+
+bool memory_can_shift(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return llama_memory_can_shift(llama_get_memory(state->ctx));
+}
+
+//
+// Performance counters
+//
+
+void perf_context(void* state_ptr, double* t_start_ms, double* t_load_ms,
+                  double* t_p_eval_ms, double* t_eval_ms,
+                  int* n_p_eval, int* n_eval, int* n_reused) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    const llama_perf_context_data d = llama_perf_context(state->ctx);
+    if (t_start_ms)  *t_start_ms  = d.t_start_ms;
+    if (t_load_ms)   *t_load_ms   = d.t_load_ms;
+    if (t_p_eval_ms) *t_p_eval_ms = d.t_p_eval_ms;
+    if (t_eval_ms)   *t_eval_ms   = d.t_eval_ms;
+    if (n_p_eval)    *n_p_eval    = d.n_p_eval;
+    if (n_eval)      *n_eval      = d.n_eval;
+    if (n_reused)    *n_reused    = d.n_reused;
+}
+
+void perf_context_reset(void* state_ptr) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    llama_perf_context_reset(state->ctx);
+}
+
+void perf_sampler(void* smpl, double* t_sample_ms, int* n_sample) {
+    const llama_perf_sampler_data d = llama_perf_sampler((const llama_sampler*) smpl);
+    if (t_sample_ms) *t_sample_ms = d.t_sample_ms;
+    if (n_sample)    *n_sample    = d.n_sample;
+}
+
+void perf_sampler_reset(void* smpl) {
+    llama_perf_sampler_reset((llama_sampler*) smpl);
+}
+
+//
+// Library-level information
+//
+
+const char* llama_version_str(void) {
+    return llama_version();
+}
+
+long long llama_time_us_val(void) {
+    return (long long) llama_time_us();
 }

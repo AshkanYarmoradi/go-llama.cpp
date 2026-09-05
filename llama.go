@@ -210,6 +210,217 @@ func (l *LLama) MemorySeqKeep(seqID int32) {
 	C.memory_seq_keep(l.state, C.int(seqID))
 }
 
+// MemorySeqAdd shifts the positions of tokens in [p0, p1) of sequence seqID by
+// delta. Pass p0 < 0 to start at 0 and p1 < 0 to run to the end. This is how a
+// context is "slid" forward after evicting a prefix; check MemoryCanShift first,
+// since not every cache type supports it.
+func (l *LLama) MemorySeqAdd(seqID, p0, p1, delta int32) {
+	C.memory_seq_add(l.state, C.int(seqID), C.int(p0), C.int(p1), C.int(delta))
+}
+
+// MemorySeqDiv integer-divides the positions of tokens in [p0, p1) of sequence
+// seqID by d (which must be > 1) — the position-interpolation trick for
+// stretching a context beyond its trained length.
+func (l *LLama) MemorySeqDiv(seqID, p0, p1 int32, d int) {
+	C.memory_seq_div(l.state, C.int(seqID), C.int(p0), C.int(p1), C.int(d))
+}
+
+// MemorySeqPosMin returns the smallest position held in the KV cache for
+// seqID, or -1 if the sequence is empty. It is non-zero only for caches that
+// evict from the front, such as sliding-window attention.
+func (l *LLama) MemorySeqPosMin(seqID int32) int32 {
+	return int32(C.memory_seq_pos_min(l.state, C.int(seqID)))
+}
+
+// MemorySeqPosMax returns the largest position held in the KV cache for seqID,
+// or -1 if the sequence is empty. Every position in
+// [MemorySeqPosMin, MemorySeqPosMax] is guaranteed to be present.
+func (l *LLama) MemorySeqPosMax(seqID int32) int32 {
+	return int32(C.memory_seq_pos_max(l.state, C.int(seqID)))
+}
+
+// MemoryCanShift reports whether the context's KV cache supports position
+// shifting via MemorySeqAdd.
+func (l *LLama) MemoryCanShift() bool {
+	return bool(C.memory_can_shift(l.state))
+}
+
+// PoolingType identifies how a context pools token embeddings into a single
+// sequence embedding.
+type PoolingType int
+
+// Pooling strategies, mirroring llama_pooling_type.
+const (
+	PoolingUnspecified PoolingType = -1
+	PoolingNone        PoolingType = 0
+	PoolingMean        PoolingType = 1
+	PoolingCLS         PoolingType = 2
+	PoolingLast        PoolingType = 3
+	PoolingRank        PoolingType = 4
+)
+
+// String returns the llama.cpp name of the pooling strategy.
+func (p PoolingType) String() string {
+	switch p {
+	case PoolingUnspecified:
+		return "unspecified"
+	case PoolingNone:
+		return "none"
+	case PoolingMean:
+		return "mean"
+	case PoolingCLS:
+		return "cls"
+	case PoolingLast:
+		return "last"
+	case PoolingRank:
+		return "rank"
+	default:
+		return fmt.Sprintf("PoolingType(%d)", int(p))
+	}
+}
+
+// ContextParams reports the geometry the context actually runs with. The engine
+// may clamp or round what New was asked for, so prefer these over the values in
+// ModelOptions when sizing batches or picking sequence ids.
+type ContextParams struct {
+	// NCtx is the total context size across all sequences.
+	NCtx int
+	// NCtxSeq is the per-sequence context size.
+	NCtxSeq int
+	// NBatch is the maximum number of tokens a single Decode may submit.
+	NBatch int
+	// NUbatch is the physical micro-batch size the graph is built for.
+	NUbatch int
+	// NSeqMax is the number of sequences the KV cache can hold, so valid
+	// sequence ids are [0, NSeqMax).
+	NSeqMax int
+	// NRSSeq is the number of recurrent-state sequences, for models with a
+	// recurrent (Mamba-style) memory.
+	NRSSeq int
+	// Pooling is the embedding pooling strategy.
+	Pooling PoolingType
+}
+
+// ContextParams returns the geometry of the loaded context.
+func (l *LLama) ContextParams() ContextParams {
+	return ContextParams{
+		NCtx:    int(C.context_n_ctx(l.state)),
+		NCtxSeq: int(C.context_n_ctx_seq(l.state)),
+		NBatch:  int(C.context_n_batch(l.state)),
+		NUbatch: int(C.context_n_ubatch(l.state)),
+		NSeqMax: int(C.context_n_seq_max(l.state)),
+		NRSSeq:  int(C.context_n_rs_seq(l.state)),
+		Pooling: PoolingType(C.context_pooling_type(l.state)),
+	}
+}
+
+// Threads returns the thread counts the context currently uses: nThreads for
+// single-token generation and nThreadsBatch for prompt and batch processing.
+func (l *LLama) Threads() (nThreads, nThreadsBatch int) {
+	return int(C.context_n_threads(l.state)), int(C.context_n_threads_batch(l.state))
+}
+
+// SetThreads changes the thread counts used for generation (nThreads) and for
+// prompt/batch processing (nThreadsBatch). It takes effect on the next decode.
+func (l *LLama) SetThreads(nThreads, nThreadsBatch int) {
+	C.context_set_n_threads(l.state, C.int(nThreads), C.int(nThreadsBatch))
+}
+
+// SetEmbeddings switches the context between producing logits and producing
+// embeddings. It also updates what Embeddings reports, so a model loaded with
+// EnableEmbeddings can be flipped back to generation and vice versa.
+func (l *LLama) SetEmbeddings(enabled bool) {
+	C.context_set_embeddings(l.state, C.bool(enabled))
+}
+
+// SetCausalAttn selects causal (each token attends only to the past) or
+// non-causal attention. Encoder-style embedding models want non-causal.
+func (l *LLama) SetCausalAttn(causal bool) {
+	C.context_set_causal_attn(l.state, C.bool(causal))
+}
+
+// Synchronize blocks until all queued computation on the context has finished.
+// The output accessors do this for you; it is only needed when timing manually.
+func (l *LLama) Synchronize() {
+	C.context_synchronize(l.state)
+}
+
+// Perf holds llama.cpp's context-level performance counters.
+//
+// The engine skips its own timing calls unless asked; the binding enables
+// them when it creates the context, so these are populated rather than zero.
+//
+// PromptTokens and EvalTokens have a floor of 1: the engine clamps them so its
+// own reporting can divide by them without guarding against zero. A context
+// that has decoded nothing, or one just reset by PerfReset, therefore reports 1
+// rather than 0, and the two cases cannot be told apart. Use the timings to
+// decide whether any work has actually happened.
+type Perf struct {
+	// StartMS is the absolute start time in milliseconds.
+	StartMS float64
+	// LoadMS is the time spent loading the model.
+	LoadMS float64
+	// PromptEvalMS is the time spent processing prompt tokens.
+	PromptEvalMS float64
+	// EvalMS is the time spent generating tokens.
+	EvalMS float64
+	// PromptTokens is the number of prompt tokens processed, floored at 1.
+	PromptTokens int
+	// EvalTokens is the number of tokens generated, floored at 1.
+	EvalTokens int
+	// GraphsReused is the number of times a compute graph was reused.
+	GraphsReused int
+}
+
+// Perf returns the context's performance counters, accumulated since load or
+// since the last PerfReset.
+func (l *LLama) Perf() Perf {
+	var tStart, tLoad, tPEval, tEval C.double
+	var nPEval, nEval, nReused C.int
+	C.perf_context(l.state, &tStart, &tLoad, &tPEval, &tEval, &nPEval, &nEval, &nReused)
+	return Perf{
+		StartMS:      float64(tStart),
+		LoadMS:       float64(tLoad),
+		PromptEvalMS: float64(tPEval),
+		EvalMS:       float64(tEval),
+		PromptTokens: int(nPEval),
+		EvalTokens:   int(nEval),
+		GraphsReused: int(nReused),
+	}
+}
+
+// PerfReset restarts the context's performance counters. Timings go back to
+// zero; the token counts return to their floor of 1, not 0 (see Perf).
+func (l *LLama) PerfReset() { C.perf_context_reset(l.state) }
+
+// SamplerPerf holds a sampler chain's performance counters.
+type SamplerPerf struct {
+	// SampleMS is the time spent sampling, in milliseconds.
+	SampleMS float64
+	// Samples is the number of tokens sampled.
+	Samples int
+}
+
+// Perf returns the chain's sampling counters. It reports zeroes for a stage
+// that was not created by NewSamplerChain.
+func (s *Sampler) Perf() SamplerPerf {
+	var tSample C.double
+	var nSample C.int
+	C.perf_sampler(s.ptr, &tSample, &nSample)
+	return SamplerPerf{SampleMS: float64(tSample), Samples: int(nSample)}
+}
+
+// PerfReset zeroes the chain's sampling counters.
+func (s *Sampler) PerfReset() { C.perf_sampler_reset(s.ptr) }
+
+// Version returns the version string of the linked llama.cpp library.
+func Version() string { return C.GoString(C.llama_version_str()) }
+
+// TimeUS returns llama.cpp's monotonic clock in microseconds. It shares a time
+// base with the values in Perf, so it is the right clock for measuring spans
+// that are compared against them.
+func TimeUS() int64 { return int64(C.llama_time_us_val()) }
+
 // Sampler is a single sampling stage or a chain of stages, wrapping llama.cpp's
 // sampler API. Construct stages (SamplerTopK, SamplerTemp, ...), add them to a
 // chain from NewSamplerChain, then Sample from a decoded context.

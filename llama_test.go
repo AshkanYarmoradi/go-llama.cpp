@@ -320,6 +320,128 @@ how much is 2+2?
 		})
 	})
 
+	Context("Library information", func() {
+		It("reports a llama.cpp version", func() {
+			Expect(Version()).ToNot(BeEmpty())
+		})
+
+		It("exposes a monotonic clock", func() {
+			t0 := TimeUS()
+			Expect(t0).To(BeNumerically(">", int64(0)))
+			Expect(TimeUS()).To(BeNumerically(">=", t0))
+		})
+	})
+
+	Context("Context introspection and control", func() {
+		It("reports the geometry the context actually uses", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			p := model.ContextParams()
+			Expect(p.NCtx).To(BeNumerically(">", 0))
+			Expect(p.NCtxSeq).To(BeNumerically(">", 0))
+			Expect(p.NCtxSeq).To(BeNumerically("<=", p.NCtx))
+			Expect(p.NBatch).To(BeNumerically(">", 0))
+			Expect(p.NUbatch).To(BeNumerically(">", 0))
+			Expect(p.NUbatch).To(BeNumerically("<=", p.NBatch))
+			Expect(p.NSeqMax).To(BeNumerically(">=", 1))
+			Expect(p.NRSSeq).To(BeNumerically(">=", 0))
+			Expect(p.Pooling.String()).ToNot(BeEmpty())
+		})
+
+		It("round-trips the thread counts", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			model.SetThreads(2, 3)
+			gen, batch := model.Threads()
+			Expect(gen).To(Equal(2))
+			Expect(batch).To(Equal(3))
+		})
+
+		It("tracks KV-cache sequence positions across a decode", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			model.MemoryClear(true)
+			Expect(model.MemorySeqPosMax(0)).To(Equal(int32(-1)), "cache should be empty after a clear")
+
+			tokens := model.Tokenize("The capital of France is", true, false)
+			Expect(tokens).ToNot(BeEmpty())
+
+			batch := NewBatch(len(tokens), 1)
+			defer batch.Free()
+			for i, tok := range tokens {
+				Expect(batch.Add(tok, int32(i), []int32{0}, i == len(tokens)-1)).To(Succeed())
+			}
+			Expect(model.Decode(batch)).To(Equal(0))
+
+			Expect(model.MemorySeqPosMin(0)).To(BeNumerically(">=", int32(0)))
+			Expect(model.MemorySeqPosMax(0)).To(Equal(int32(len(tokens) - 1)))
+
+			// The standard context-shift idiom: evict the oldest token, then
+			// slide the remainder back so positions stay contiguous from 0.
+			// Not every cache type supports it.
+			if model.MemoryCanShift() {
+				Expect(model.MemorySeqRemove(0, 0, 1)).To(BeTrue())
+				model.MemorySeqAdd(0, 1, -1, -1)
+				Expect(model.MemorySeqPosMin(0)).To(Equal(int32(0)))
+				Expect(model.MemorySeqPosMax(0)).To(Equal(int32(len(tokens) - 2)))
+			}
+
+			model.MemorySeqKeep(0)
+			Expect(model.MemorySeqPosMax(1)).To(Equal(int32(-1)))
+		})
+
+		It("accumulates and resets performance counters", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			_, err = model.Predict("The capital of France is", SetTokens(8))
+			Expect(err).ToNot(HaveOccurred())
+
+			perf := model.Perf()
+			Expect(perf.LoadMS).To(BeNumerically(">", 0))
+			// The binding turns off no_perf, so the engine actually records
+			// timings; a multi-token prompt decode lands in the prompt-eval
+			// bucket and a generated token in the eval bucket.
+			Expect(perf.PromptEvalMS).To(BeNumerically(">", 0))
+			Expect(perf.PromptTokens).To(BeNumerically(">", 1))
+			Expect(perf.EvalMS).To(BeNumerically(">", 0))
+
+			model.PerfReset()
+			reset := model.Perf()
+			Expect(reset.PromptEvalMS).To(BeNumerically("==", 0))
+			Expect(reset.EvalMS).To(BeNumerically("==", 0))
+			// llama.cpp floors these counters at 1 so its own reporting can
+			// divide by them, so a reset context reports 1 rather than 0.
+			Expect(reset.PromptTokens).To(Equal(1))
+			Expect(reset.EvalTokens).To(Equal(1))
+			// Load time survives a reset; only the eval counters restart.
+			Expect(reset.LoadMS).To(Equal(perf.LoadMS))
+		})
+	})
+
 	Context("Inferencing tests with GPU (using "+testModelPath+") ", Label("gpu"), func() {
 		getModel := func() (*LLama, error) {
 			model, err := New(
