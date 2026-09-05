@@ -816,6 +816,163 @@ how much is 2+2?
 		})
 	})
 
+	Context("Sampler chain introspection", func() {
+		newModel := func() *LLama {
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(model).ToNot(BeNil())
+			return model
+		}
+
+		It("reports stage names, count and seeds", func() {
+			chain := NewSamplerChain()
+			defer chain.Free()
+
+			Expect(chain.Len()).To(Equal(0))
+			Expect(chain.Name()).To(Equal("chain"))
+
+			chain.Add(SamplerTopK(40))
+			chain.Add(SamplerTemp(0.8))
+			chain.Add(SamplerDist(1234))
+			Expect(chain.Len()).To(Equal(3))
+
+			Expect(chain.At(0).Name()).To(ContainSubstring("top-k"))
+			Expect(chain.At(2).Seed()).To(Equal(uint32(1234)))
+
+			// Stages without randomness report the default seed.
+			Expect(chain.At(0).Seed()).To(Equal(DefaultSeed))
+
+			Expect(chain.At(-1)).To(BeNil())
+			Expect(chain.At(3)).To(BeNil())
+		})
+
+		It("removes a stage and hands over ownership", func() {
+			chain := NewSamplerChain()
+			defer chain.Free()
+
+			chain.Add(SamplerTopK(40))
+			chain.Add(SamplerTemp(0.8))
+			Expect(chain.Len()).To(Equal(2))
+
+			removed := chain.Remove(0)
+			Expect(removed).ToNot(BeNil())
+			Expect(removed.Name()).To(ContainSubstring("top-k"))
+			Expect(chain.Len()).To(Equal(1))
+			Expect(chain.At(0).Name()).To(ContainSubstring("temp"))
+
+			// Ownership transferred, so this is the caller's to free.
+			removed.Free()
+
+			Expect(chain.Remove(5)).To(BeNil())
+		})
+
+		It("clones a chain independently", func() {
+			chain := NewSamplerChain()
+			defer chain.Free()
+			chain.Add(SamplerTopK(40))
+			chain.Add(SamplerDist(99))
+
+			clone := chain.Clone()
+			Expect(clone).ToNot(BeNil())
+			defer clone.Free()
+
+			Expect(clone.Len()).To(Equal(2))
+			Expect(clone.At(1).Seed()).To(Equal(uint32(99)))
+
+			// Mutating the clone leaves the original alone.
+			clone.Remove(0).Free()
+			Expect(clone.Len()).To(Equal(1))
+			Expect(chain.Len()).To(Equal(2))
+		})
+
+		It("tolerates an empty sampler", func() {
+			var empty Sampler
+			Expect(empty.Len()).To(Equal(0))
+			Expect(empty.Name()).To(BeEmpty())
+			Expect(empty.Seed()).To(Equal(DefaultSeed))
+			Expect(empty.Clone()).To(BeNil())
+			empty.Free()
+		})
+
+		It("builds the model-bound stages", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := newModel()
+			defer model.Free()
+
+			_, err := model.Predict("The capital of France is", SetTokens(4))
+			Expect(err).ToNot(HaveOccurred())
+
+			chain := NewSamplerChain()
+			defer chain.Free()
+			chain.Add(model.SamplerInfill())
+			chain.Add(SamplerAdaptiveP(0.5, 0.9, 7))
+			chain.Add(SamplerDist(1))
+			Expect(chain.Len()).To(Equal(3))
+
+			tok := chain.Sample(model, -1)
+			Expect(tok).To(BeNumerically(">=", int32(0)))
+			Expect(tok).To(BeNumerically("<", int32(model.GetModelInfo().VocabSize)))
+		})
+
+		It("bans a token with a large negative logit bias", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := newModel()
+			defer model.Free()
+
+			_, err := model.Predict("The capital of France is", SetTokens(4))
+			Expect(err).ToNot(HaveOccurred())
+
+			// Find what greedy would pick with no bias applied.
+			plain := NewSamplerChain()
+			plain.Add(SamplerGreedy())
+			favourite := plain.Sample(model, -1)
+			plain.Free()
+
+			// Ban it, and greedy must choose something else.
+			biased := NewSamplerChain()
+			defer biased.Free()
+			biased.Add(model.SamplerLogitBias([]LogitBias{{Token: favourite, Bias: -1e9}}))
+			biased.Add(SamplerGreedy())
+
+			Expect(biased.Sample(model, -1)).ToNot(Equal(favourite))
+		})
+
+		It("ignores an empty logit bias list", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := newModel()
+			defer model.Free()
+
+			chain := NewSamplerChain()
+			defer chain.Free()
+			chain.Add(model.SamplerLogitBias(nil))
+			Expect(chain.Len()).To(Equal(0))
+		})
+
+		It("builds a lazy grammar stage", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := newModel()
+			defer model.Free()
+
+			s := model.SamplerGrammarLazy(
+				`root ::= "yes" | "no"`, "root",
+				[]string{"ANSWER:"}, nil,
+			)
+			Expect(s).ToNot(BeNil())
+			chain := NewSamplerChain()
+			defer chain.Free()
+			chain.Add(s)
+			Expect(chain.Len()).To(Equal(1))
+		})
+	})
+
 	Context("Inferencing tests with GPU (using "+testModelPath+") ", Label("gpu"), func() {
 		getModel := func() (*LLama, error) {
 			model, err := New(

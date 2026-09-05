@@ -510,6 +510,160 @@ func (l *LLama) SamplerDRY(multiplier, base float32, allowedLength, penaltyLastN
 		C.int(allowedLength), C.int(penaltyLastN))}
 }
 
+// SamplerInfill builds a fill-in-the-middle stage. It belongs after the
+// truncation stages (top-k, top-p): it merges candidates that share a prefix
+// and prefers an end-of-generation token once the hole is filled, which is what
+// keeps FIM generation from running past the insertion point.
+func (l *LLama) SamplerInfill() *Sampler {
+	return &Sampler{ptr: C.sampler_init_infill(l.state)}
+}
+
+// SamplerAdaptiveP builds an adaptive-p stage, which steers sampling toward
+// tokens near the target probability instead of using a fixed cutoff. target is
+// in [0, 1] (negative disables); decay is the EMA factor in [0, 0.99], giving a
+// history of roughly 1/(1-decay) tokens.
+//
+// llama.cpp recommends running it with min-p as the only other truncation stage
+// in the chain — stacking it behind top-k and top-p defeats the adaptation.
+func SamplerAdaptiveP(target, decay float32, seed uint32) *Sampler {
+	return &Sampler{ptr: C.sampler_init_adaptive_p(C.float(target), C.float(decay), C.uint(seed))}
+}
+
+// LogitBias shifts the logit of one token before sampling. A large negative
+// bias effectively bans a token; a large positive one forces it.
+type LogitBias struct {
+	Token int32
+	Bias  float32
+}
+
+// SamplerLogitBias builds a stage that applies the given biases. Put it first
+// in a chain so the adjustment is visible to every stage after it, including
+// greedy selection.
+func (l *LLama) SamplerLogitBias(biases []LogitBias) *Sampler {
+	if len(biases) == 0 {
+		return &Sampler{}
+	}
+	tokens := make([]int32, len(biases))
+	values := make([]float32, len(biases))
+	for i, b := range biases {
+		tokens[i] = b.Token
+		values[i] = b.Bias
+	}
+	return &Sampler{ptr: C.sampler_init_logit_bias(l.state, C.int(len(biases)),
+		(*C.int)(unsafe.Pointer(&tokens[0])),
+		(*C.float)(unsafe.Pointer(&values[0])))}
+}
+
+// SamplerGrammarLazy builds a grammar stage that stays inactive until the
+// output matches one of triggerPatterns (regular expressions) or produces one
+// of triggerTokens, and constrains everything from that point on.
+//
+// This is how a tool-call grammar is applied only once the model has actually
+// started emitting a call, leaving ordinary prose unconstrained.
+func (l *LLama) SamplerGrammarLazy(grammar, root string, triggerPatterns []string, triggerTokens []int32) *Sampler {
+	cG := C.CString(grammar)
+	defer C.free(unsafe.Pointer(cG))
+	cR := C.CString(root)
+	defer C.free(unsafe.Pointer(cR))
+
+	var patterns **C.char
+	if len(triggerPatterns) > 0 {
+		cPatterns := make([]*C.char, len(triggerPatterns))
+		defer func() {
+			for _, p := range cPatterns {
+				C.free(unsafe.Pointer(p))
+			}
+		}()
+		for i, p := range triggerPatterns {
+			cPatterns[i] = C.CString(p)
+		}
+		patterns = (**C.char)(unsafe.Pointer(&cPatterns[0]))
+	}
+
+	var tokens *C.int
+	if len(triggerTokens) > 0 {
+		tokens = (*C.int)(unsafe.Pointer(&triggerTokens[0]))
+	}
+
+	return &Sampler{ptr: C.sampler_init_grammar_lazy(l.state, cG, cR,
+		patterns, C.int(len(triggerPatterns)),
+		tokens, C.int(len(triggerTokens)))}
+}
+
+// Len returns the number of stages in a chain, or 0 for a single stage.
+func (s *Sampler) Len() int { return int(C.sampler_chain_n(s.ptr)) }
+
+// At returns the i-th stage of a chain without transferring ownership: the
+// returned Sampler must not be freed, and becomes invalid when the chain is.
+// It returns nil if i is out of range.
+func (s *Sampler) At(i int) *Sampler {
+	if i < 0 || i >= s.Len() {
+		return nil
+	}
+	p := C.sampler_chain_get(s.ptr, C.int(i))
+	if p == nil {
+		return nil
+	}
+	return &Sampler{ptr: p}
+}
+
+// Remove detaches the i-th stage from a chain and transfers ownership of it to
+// the caller, who must Free it. It returns nil if i is out of range.
+func (s *Sampler) Remove(i int) *Sampler {
+	if i < 0 || i >= s.Len() {
+		return nil
+	}
+	p := C.sampler_chain_remove(s.ptr, C.int(i))
+	if p == nil {
+		return nil
+	}
+	return &Sampler{ptr: p}
+}
+
+// Name returns llama.cpp's name for the stage, such as "top-k" or "dist"; a
+// chain is named "chain".
+//
+// The engine decorates the name to describe the stage's state, so match on a
+// substring rather than equality:
+//
+//	"?top-k"   the stage was built with parameters that disable it
+//	"+top-k"   it has been initialised and runs on the backend
+//	"-top-k"   it has been initialised but the backend cannot run it
+//
+// The bare name is what you see before the chain has sampled anything.
+func (s *Sampler) Name() string {
+	buf := make([]byte, 64)
+	ret := int(C.sampler_name(s.ptr, (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+	if ret <= 0 || ret > len(buf) {
+		return ""
+	}
+	return string(buf[:ret])
+}
+
+// Clone returns an independent copy of the sampler, including any accumulated
+// state, so a speculative branch can be explored without disturbing the
+// original. Cloning a chain clones every stage in it. The copy is owned by the
+// caller and must be Freed.
+//
+// Every stage this package can build implements cloning, so this cannot fail
+// for them; it returns nil only for an empty Sampler.
+func (s *Sampler) Clone() *Sampler {
+	p := C.sampler_clone(s.ptr)
+	if p == nil {
+		return nil
+	}
+	return &Sampler{ptr: p}
+}
+
+// Seed returns the RNG seed a stage was built with, or DefaultSeed for a stage
+// that does not use randomness.
+func (s *Sampler) Seed() uint32 { return uint32(C.sampler_get_seed(s.ptr)) }
+
+// DefaultSeed is llama.cpp's LLAMA_DEFAULT_SEED: the value Sampler.Seed reports
+// for a stage with no seed of its own, and the value that asks the engine to
+// pick a random one.
+const DefaultSeed uint32 = 0xFFFFFFFF
+
 // ModelInfo contains information about the loaded model
 type ModelInfo struct {
 	VocabSize          int
