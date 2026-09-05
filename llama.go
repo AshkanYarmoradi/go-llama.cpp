@@ -9,6 +9,7 @@ package llama
 // #include <stdlib.h>
 import "C"
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -599,18 +600,140 @@ func grow(fn func(buf []byte) int) (string, bool) {
 	return string(buf[:n]), true
 }
 
-// GetChatTemplate returns the chat template for the model
-// Pass empty string for default template, or template name for specific template
+// ChatMessage is a single turn in a chat, as consumed by ApplyChatTemplate.
+// Role is conventionally "system", "user" or "assistant"; which roles a given
+// template understands is up to that template.
+type ChatMessage struct {
+	Role    string
+	Content string
+}
+
+// ErrNoChatTemplate is returned when a chat template cannot be applied: either
+// the model carries no template of its own and none was supplied, or the
+// template is not one llama.cpp knows how to render.
+var ErrNoChatTemplate = errors.New("llama: no usable chat template")
+
+// ApplyChatTemplate renders messages into a single prompt string using tmpl.
+// Pass an empty tmpl to use the template stored in the model's GGUF metadata.
+//
+// When addAssistant is true the result ends with the token(s) that open an
+// assistant turn, which is what you want before generating a reply.
+//
+// Note that llama.cpp does not run a full Jinja engine here: it recognises a
+// fixed set of well-known templates. A model whose template is not on that list
+// returns ErrNoChatTemplate, and the caller should format the prompt itself.
+func (l *LLama) ApplyChatTemplate(tmpl string, messages []ChatMessage, addAssistant bool) (string, error) {
+	var cTmpl *C.char
+	if tmpl != "" {
+		cTmpl = C.CString(tmpl)
+		defer C.free(unsafe.Pointer(cTmpl))
+	}
+
+	// Two parallel C arrays of char*, one allocation per string, all freed on
+	// the way out. Keeping them parallel avoids needing a JSON round-trip.
+	n := len(messages)
+	var roles, contents **C.char
+	if n > 0 {
+		roleSlice := make([]*C.char, n)
+		contentSlice := make([]*C.char, n)
+		defer func() {
+			for i := 0; i < n; i++ {
+				C.free(unsafe.Pointer(roleSlice[i]))
+				C.free(unsafe.Pointer(contentSlice[i]))
+			}
+		}()
+		for i, m := range messages {
+			roleSlice[i] = C.CString(m.Role)
+			contentSlice[i] = C.CString(m.Content)
+		}
+		roles = (**C.char)(unsafe.Pointer(&roleSlice[0]))
+		contents = (**C.char)(unsafe.Pointer(&contentSlice[0]))
+	}
+
+	// Size the first attempt from the input, then retry once at the exact
+	// length the engine reports if the guess was short.
+	size := chatBufferHint(messages)
+	for attempt := 0; attempt < 2; attempt++ {
+		buf := make([]byte, size)
+		ret := int(C.apply_chat_template(l.state, cTmpl, roles, contents, C.int(n),
+			C.bool(addAssistant), (*C.char)(unsafe.Pointer(&buf[0])), C.int(size)))
+		switch {
+		case ret < 0:
+			return "", ErrNoChatTemplate
+		case ret <= size:
+			return string(buf[:ret]), nil
+		}
+		size = ret + 1
+	}
+	return "", fmt.Errorf("llama: chat template output kept growing past %d bytes", size)
+}
+
+// chatBufferHint is llama.cpp's own recommendation: twice the total message
+// length, with a floor that comfortably covers the template's own boilerplate.
+func chatBufferHint(messages []ChatMessage) int {
+	total := 0
+	for _, m := range messages {
+		total += len(m.Role) + len(m.Content)
+	}
+	if size := 2 * total; size > 1024 {
+		return size
+	}
+	return 1024
+}
+
+// BuiltinChatTemplates returns the names of the chat templates built into
+// llama.cpp. Any of these can be passed as the tmpl argument to
+// ApplyChatTemplate.
+func BuiltinChatTemplates() []string {
+	n := int(C.chat_builtin_template_count())
+	if n <= 0 {
+		return nil
+	}
+	names := make([]string, 0, n)
+	buf := make([]byte, 256)
+	for i := 0; i < n; i++ {
+		ret := int(C.chat_builtin_template_name(C.int(i),
+			(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+		if ret <= 0 {
+			continue
+		}
+		if ret > len(buf) {
+			buf = make([]byte, ret+1)
+			ret = int(C.chat_builtin_template_name(C.int(i),
+				(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+			if ret <= 0 {
+				continue
+			}
+		}
+		names = append(names, string(buf[:ret]))
+	}
+	return names
+}
+
+// GetChatTemplate returns the model's chat template as stored in its GGUF
+// metadata. Pass an empty name for the default template, or a name to select
+// one of several (e.g. "rag", "tool_use"). It returns "" when the model has no
+// such template.
 func (l *LLama) GetChatTemplate(name string) string {
-	buf := make([]byte, 4096)
 	var cName *C.char
 	if name != "" {
 		cName = C.CString(name)
 		defer C.free(unsafe.Pointer(cName))
 	}
-	ret := C.get_model_chat_template(l.state, cName, (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)))
+
+	// Templates regularly exceed a naive fixed buffer, so grow to the length
+	// the binding reports rather than returning a silently truncated template.
+	buf := make([]byte, 4096)
+	ret := int(C.get_model_chat_template(l.state, cName, (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
 	if ret <= 0 {
 		return ""
+	}
+	if ret > len(buf) {
+		buf = make([]byte, ret+1)
+		ret = int(C.get_model_chat_template(l.state, cName, (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+		if ret <= 0 || ret > len(buf) {
+			return ""
+		}
 	}
 	return string(buf[:ret])
 }

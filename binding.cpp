@@ -988,13 +988,10 @@ int get_model_chat_template(void* state_ptr, const char* name, char* buf, int bu
     if (tmpl == nullptr) {
         return 0;
     }
-    int len = strlen(tmpl);
-    if (len >= buf_size) {
-        len = buf_size - 1;
-    }
-    strncpy(buf, tmpl, len);
-    buf[len] = '\0';
-    return len;
+    // snprintf semantics: report the length the template needs, so a caller
+    // whose buffer was too small can size the retry exactly. Chat templates
+    // routinely run past a naive 4 KiB guess.
+    return snprintf(buf, (size_t) buf_size, "%s", tmpl);
 }
 
 // Extended model geometry
@@ -1221,20 +1218,6 @@ void* sampler_init_dry(void* state_ptr, float multiplier, float base, int allowe
                                   nullptr, 0);
 }
 
-int apply_chat_template(void* state_ptr, const char* tmpl, const char* messages_json,
-                        bool add_generation_prompt, char* result, int result_size) {
-    // Note: This is a simplified implementation - full implementation would need JSON parsing
-    // For now, return -1 to indicate not implemented
-    // Users should use the chat template string directly and format messages themselves
-    (void)state_ptr;
-    (void)tmpl;
-    (void)messages_json;
-    (void)add_generation_prompt;
-    (void)result;
-    (void)result_size;
-    return -1;
-}
-
 //
 // Context runtime introspection and control
 //
@@ -1379,4 +1362,62 @@ const char* llama_version_str(void) {
 
 long long llama_time_us_val(void) {
     return (long long) llama_time_us();
+}
+
+int apply_chat_template(void* state_ptr, const char* tmpl,
+                        const char** roles, const char** contents, int n_msg,
+                        bool add_assistant, char* buf, int buf_size) {
+    if (n_msg < 0 || (n_msg > 0 && (roles == nullptr || contents == nullptr))) {
+        return -1;
+    }
+
+    // An empty tmpl means "use the template baked into the model".
+    std::string tmpl_owned;
+    if (tmpl == nullptr || tmpl[0] == '\0') {
+        llama_binding_state* state = (llama_binding_state*) state_ptr;
+        if (state == nullptr) {
+            return -1;
+        }
+        const char* model_tmpl = llama_model_chat_template(state->model, nullptr);
+        if (model_tmpl == nullptr) {
+            return -1;  // the model carries no chat template
+        }
+        tmpl_owned = model_tmpl;
+    } else {
+        tmpl_owned = tmpl;
+    }
+
+    std::vector<llama_chat_message> messages;
+    messages.reserve((size_t) n_msg);
+    for (int i = 0; i < n_msg; i++) {
+        if (roles[i] == nullptr || contents[i] == nullptr) {
+            return -1;
+        }
+        messages.push_back({ roles[i], contents[i] });
+    }
+
+    // llama_chat_apply_template returns the full length even when it exceeds
+    // the buffer, so the caller can size a retry exactly.
+    return llama_chat_apply_template(tmpl_owned.c_str(), messages.data(), messages.size(),
+                                     add_assistant, buf, buf_size);
+}
+
+int chat_builtin_template_count(void) {
+    return llama_chat_builtin_templates(nullptr, 0);
+}
+
+int chat_builtin_template_name(int i, char* buf, int buf_size) {
+    if (i < 0 || buf == nullptr || buf_size <= 0) {
+        return -1;
+    }
+    const int n = llama_chat_builtin_templates(nullptr, 0);
+    if (n <= 0 || i >= n) {
+        return -1;
+    }
+    std::vector<const char*> names((size_t) n, nullptr);
+    llama_chat_builtin_templates(names.data(), names.size());
+    if (names[(size_t) i] == nullptr) {
+        return -1;
+    }
+    return snprintf(buf, (size_t) buf_size, "%s", names[(size_t) i]);
 }

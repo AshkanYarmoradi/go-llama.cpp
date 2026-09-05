@@ -2,6 +2,7 @@ package llama_test
 
 import (
 	"os"
+	"strings"
 
 	"github.com/AshkanYarmoradi/go-llama.cpp"
 	. "github.com/AshkanYarmoradi/go-llama.cpp"
@@ -439,6 +440,98 @@ how much is 2+2?
 			Expect(reset.EvalTokens).To(Equal(1))
 			// Load time survives a reset; only the eval counters restart.
 			Expect(reset.LoadMS).To(Equal(perf.LoadMS))
+		})
+	})
+
+	Context("Chat templates", func() {
+		It("lists the built-in templates", func() {
+			names := BuiltinChatTemplates()
+			Expect(names).ToNot(BeEmpty())
+			Expect(names).To(ContainElement("chatml"))
+			for _, n := range names {
+				Expect(n).ToNot(BeEmpty())
+			}
+		})
+
+		It("renders a chat with an explicit template", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			msgs := []ChatMessage{
+				{Role: "system", Content: "You are terse."},
+				{Role: "user", Content: "How much is 2+2?"},
+			}
+
+			out, err := model.ApplyChatTemplate("chatml", msgs, true)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(out).To(ContainSubstring("You are terse."))
+			Expect(out).To(ContainSubstring("How much is 2+2?"))
+			Expect(out).To(ContainSubstring("<|im_start|>"))
+			// addAssistant opens the reply turn.
+			Expect(out).To(HaveSuffix("<|im_start|>assistant\n"))
+		})
+
+		It("omits the assistant turn when not requested", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			msgs := []ChatMessage{{Role: "user", Content: "hi"}}
+			out, err := model.ApplyChatTemplate("chatml", msgs, false)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(out).ToNot(HaveSuffix("<|im_start|>assistant\n"))
+		})
+
+		It("grows the buffer for a message larger than the initial guess", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			long := strings.Repeat("word ", 4000)
+			out, err := model.ApplyChatTemplate("chatml", []ChatMessage{{Role: "user", Content: long}}, true)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(len(out)).To(BeNumerically(">=", len(long)))
+			Expect(out).To(ContainSubstring(long))
+		})
+
+		It("reports an unusable template rather than truncating", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			_, err = model.ApplyChatTemplate("not-a-real-template", []ChatMessage{{Role: "user", Content: "hi"}}, true)
+			Expect(err).To(MatchError(ErrNoChatTemplate))
+		})
+
+		It("handles an empty message list", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			out, err := model.ApplyChatTemplate("chatml", nil, true)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(out).To(Equal("<|im_start|>assistant\n"))
 		})
 	})
 
