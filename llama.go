@@ -81,6 +81,126 @@ func (l *LLama) ClearLoRA() {
 	C.clear_lora_adapters(l.state)
 }
 
+// LoRACount returns how many adapters are currently applied to the context.
+// Adapters are indexed by application order, which is the order ApplyLoRA was
+// called in since the last ClearLoRA.
+func (l *LLama) LoRACount() int {
+	return int(C.lora_adapter_count(l.state))
+}
+
+// LoRAMetadata returns the GGUF key-value header of the i-th applied adapter —
+// the rank, alpha, and whatever the training tool recorded. It returns nil for
+// an index outside the applied set.
+func (l *LLama) LoRAMetadata(i int) map[string]string {
+	n := int(C.lora_adapter_meta_count(l.state, C.int(i)))
+	if n <= 0 {
+		return nil
+	}
+	out := make(map[string]string, n)
+	for j := 0; j < n; j++ {
+		key := adapterString(func(buf []byte) int {
+			return int(C.lora_adapter_meta_key_by_index(l.state, C.int(i), C.int(j),
+				(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+		})
+		if key == "" {
+			continue
+		}
+		out[key] = adapterString(func(buf []byte) int {
+			return int(C.lora_adapter_meta_val_str_by_index(l.state, C.int(i), C.int(j),
+				(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+		})
+	}
+	return out
+}
+
+// LoRAMetadataValue returns one metadata value from the i-th applied adapter.
+// The second result reports whether the key was present.
+func (l *LLama) LoRAMetadataValue(i int, key string) (string, bool) {
+	cKey := C.CString(key)
+	defer C.free(unsafe.Pointer(cKey))
+
+	var found bool
+	v := adapterString(func(buf []byte) int {
+		ret := int(C.lora_adapter_meta_val_str(l.state, C.int(i), cKey,
+			(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+		found = ret >= 0
+		return ret
+	})
+	return v, found
+}
+
+// LoRAInvocationTokens returns the invocation tokens of the i-th applied
+// adapter when it is an activated LoRA (aLoRA) — one that stays dormant until
+// the model emits that exact token sequence, and applies from then on.
+//
+// It returns nil for a plain LoRA, which has no invocation sequence, and for an
+// index outside the applied set.
+func (l *LLama) LoRAInvocationTokens(i int) []int32 {
+	n := int(C.lora_adapter_alora_tokens(l.state, C.int(i), nil, 0))
+	if n == 0 || n == -1 {
+		return nil
+	}
+	if n < 0 {
+		n = -n
+	}
+	out := make([]int32, n)
+	got := int(C.lora_adapter_alora_tokens(l.state, C.int(i),
+		(*C.int)(unsafe.Pointer(&out[0])), C.int(n)))
+	if got <= 0 {
+		return nil
+	}
+	return out[:got]
+}
+
+// SetControlVector applies a control (steering) vector to the context: a
+// direction added to the residual stream of layers ilStart through ilEnd
+// inclusive, which nudges generation toward or away from some behaviour
+// without retraining anything.
+//
+// data is nEmbd x nLayers floats laid out starting from layer 1, so len(data)
+// must be a multiple of nEmbd. Pass nil to clear the active vector.
+func (l *LLama) SetControlVector(data []float32, nEmbd, ilStart, ilEnd int) error {
+	if len(data) == 0 {
+		if ret := int(C.set_control_vector(l.state, nil, 0, 0, 0, 0)); ret != 0 {
+			return fmt.Errorf("llama: failed to clear the control vector (%d)", ret)
+		}
+		return nil
+	}
+	if nEmbd <= 0 || len(data)%nEmbd != 0 {
+		return fmt.Errorf("llama: control vector length %d is not a multiple of n_embd %d", len(data), nEmbd)
+	}
+	ret := int(C.set_control_vector(l.state,
+		(*C.float)(unsafe.Pointer(&data[0])), C.int(len(data)),
+		C.int(nEmbd), C.int(ilStart), C.int(ilEnd)))
+	if ret != 0 {
+		return fmt.Errorf("llama: failed to apply the control vector (%d)", ret)
+	}
+	return nil
+}
+
+// ClearControlVector removes any control vector applied to the context.
+func (l *LLama) ClearControlVector() error {
+	return l.SetControlVector(nil, 0, 0, 0)
+}
+
+// adapterString runs fn against a buffer, growing once if fn reports it needs
+// more room (snprintf semantics). It returns "" when fn reports an error.
+func adapterString(fn func(buf []byte) int) string {
+	buf := make([]byte, 256)
+	ret := fn(buf)
+	if ret < 0 {
+		return ""
+	}
+	if ret > len(buf) {
+		buf = make([]byte, ret+1)
+		ret = fn(buf)
+		if ret < 0 || ret > len(buf) {
+			return ""
+		}
+	}
+	return string(buf[:ret])
+}
+
 // Batch accumulates tokens — each with a position, sequence IDs, and a flag for
 // whether its output is wanted — for a Decode or Encode call. It wraps the
 // engine's llama_batch; call Free when done.

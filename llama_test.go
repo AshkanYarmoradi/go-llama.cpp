@@ -1056,6 +1056,73 @@ how much is 2+2?
 		})
 	})
 
+	Context("Adapters and control vectors", func() {
+		newModel := func() *LLama {
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(model).ToNot(BeNil())
+			return model
+		}
+
+		It("reports an empty adapter set on a fresh model", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := newModel()
+			defer model.Free()
+
+			Expect(model.LoRACount()).To(Equal(0))
+
+			// Every accessor must reject an index outside the applied set
+			// rather than indexing into an empty vector.
+			for _, bad := range []int{-1, 0, 99} {
+				Expect(model.LoRAMetadata(bad)).To(BeNil())
+				Expect(model.LoRAInvocationTokens(bad)).To(BeNil())
+				_, ok := model.LoRAMetadataValue(bad, "adapter.lora.alpha")
+				Expect(ok).To(BeFalse())
+			}
+		})
+
+		It("rejects a control vector whose length does not match n_embd", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := newModel()
+			defer model.Free()
+
+			nEmbd := model.GetModelInfo().EmbeddingSize
+			Expect(nEmbd).To(BeNumerically(">", 0))
+
+			// One element short of a whole layer.
+			bad := make([]float32, nEmbd+1)
+			Expect(model.SetControlVector(bad, nEmbd, 1, 2)).To(HaveOccurred())
+			Expect(model.SetControlVector(bad, 0, 1, 2)).To(HaveOccurred())
+		})
+
+		It("applies and clears a control vector", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := newModel()
+			defer model.Free()
+
+			info := model.GetModelInfo()
+			nEmbd := info.EmbeddingSize
+			nLayers := 2
+
+			// A zero vector is a no-op direction, so this exercises the plumbing
+			// without asserting anything about what steering does to output.
+			vec := make([]float32, nEmbd*nLayers)
+			Expect(model.SetControlVector(vec, nEmbd, 1, nLayers)).To(Succeed())
+
+			// Generation still works with a vector applied.
+			out, err := model.Predict("The capital of France is", SetTokens(4))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(out).ToNot(BeEmpty())
+
+			Expect(model.ClearControlVector()).To(Succeed())
+		})
+	})
 	Context("Inferencing tests with GPU (using "+testModelPath+") ", Label("gpu"), func() {
 		getModel := func() (*LLama, error) {
 			model, err := New(
