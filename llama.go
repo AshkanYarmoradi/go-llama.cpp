@@ -11,7 +11,6 @@ import "C"
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"unsafe"
@@ -177,10 +176,13 @@ func (l *LLama) LoRAMetadataValue(i int, key string) (string, bool) {
 // index outside the applied set.
 func (l *LLama) LoRAInvocationTokens(i int) []int32 {
 	n := int(C.lora_adapter_alora_tokens(l.state, C.int(i), nil, 0))
-	if n == 0 || n == -1 {
+	if n == 0 {
+		// 0 means no invocation sequence: a plain LoRA or an out-of-range index.
 		return nil
 	}
 	if n < 0 {
+		// The probe reports -count when the (nil) buffer is too small, so a
+		// single-token aLoRA reports -1 — a real sequence, not an error.
 		n = -n
 	}
 	out := make([]int32, n)
@@ -472,8 +474,13 @@ func (l *LLama) MemorySeqAdd(seqID, p0, p1, delta int32) {
 
 // MemorySeqDiv integer-divides the positions of tokens in [p0, p1) of sequence
 // seqID by d (which must be > 1) — the position-interpolation trick for
-// stretching a context beyond its trained length.
+// stretching a context beyond its trained length. It is a no-op for d <= 1,
+// which also keeps d == 0 from reaching an integer division by zero in the
+// engine (a process-killing SIGFPE).
 func (l *LLama) MemorySeqDiv(seqID, p0, p1 int32, d int) {
+	if d <= 1 {
+		return
+	}
 	C.memory_seq_div(l.state, C.int(seqID), C.int(p0), C.int(p1), C.int(d))
 }
 
@@ -1320,14 +1327,17 @@ func (l *LLama) Architecture() Architecture {
 	a.FileTypeName = FileTypeName(a.FileType)
 
 	if n := int(C.get_model_n_cls_out(l.state)); n > 0 {
-		buf := make([]byte, 128)
+		// Index by i into a pre-sized slice: a label that is missing or too long
+		// for the first buffer must leave an empty slot, not be dropped, or every
+		// later label would shift out of alignment with its classifier output.
+		// grow resizes for a long label instead of truncating it.
+		a.ClassifierLabels = make([]string, n)
 		for i := 0; i < n; i++ {
-			ret := int(C.get_model_cls_label(l.state, C.int(i),
-				(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
-			if ret <= 0 || ret >= len(buf) {
-				continue
-			}
-			a.ClassifierLabels = append(a.ClassifierLabels, string(buf[:ret]))
+			label, _ := grow(func(buf []byte) int {
+				return int(C.get_model_cls_label(l.state, C.int(i),
+					(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+			})
+			a.ClassifierLabels[i] = label
 		}
 	}
 	return a
@@ -1744,9 +1754,8 @@ func (l *LLama) SaveModel(path string) error {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	C.save_model_to_file(l.state, cPath)
-	if _, err := os.Stat(path); err != nil {
-		return fmt.Errorf("llama: model was not written to %q: %w", path, err)
+	if !bool(C.save_model_to_file(l.state, cPath)) {
+		return fmt.Errorf("llama: failed to write model to %q", path)
 	}
 	return nil
 }
@@ -1904,7 +1913,14 @@ func (l *LLama) LoadSessionFile(path string) ([]int32, error) {
 		capacity = l.contextSize
 	}
 	tokens := make([]int32, capacity)
-	n := int(C.state_load_file(l.state, cPath, (*C.int)(unsafe.Pointer(&tokens[0])), C.int(capacity)))
+	// Guard &tokens[0] against a zero capacity (both sources unavailable): pass a
+	// nil buffer instead, which state_load_file reports as an error rather than
+	// indexing an empty slice.
+	var out *C.int
+	if capacity > 0 {
+		out = (*C.int)(unsafe.Pointer(&tokens[0]))
+	}
+	n := int(C.state_load_file(l.state, cPath, out, C.int(capacity)))
 	if n < 0 {
 		return nil, fmt.Errorf("llama: failed to read session file %q", path)
 	}
@@ -2071,15 +2087,14 @@ func (l *LLama) LoadState(state string) error {
 
 func (l *LLama) SaveState(dst string) error {
 	d := C.CString(dst)
+	defer C.free(unsafe.Pointer(d))
 	w := C.CString("wb")
+	defer C.free(unsafe.Pointer(w))
 
-	C.save_state(l.state, d, w)
-
-	defer C.free(unsafe.Pointer(d)) // free allocated C string
-	defer C.free(unsafe.Pointer(w)) // free allocated C string
-
-	_, err := os.Stat(dst)
-	return err
+	if C.save_state(l.state, d, w) != 0 {
+		return fmt.Errorf("llama: failed to write state to %q", dst)
+	}
+	return nil
 }
 
 // Token Embeddings

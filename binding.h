@@ -18,7 +18,7 @@ bool has_log_callback(void);
 
 int load_state(void *ctx, char *statefile, char*modes);
 
-void save_state(void *ctx, char *dst, char*modes);
+int save_state(void *ctx, char *dst, char*modes);
 
 void* load_model(const char *fname, 
                  int n_ctx, 
@@ -278,7 +278,7 @@ int quantize_model(const char* fname_in, const char* fname_out, int ftype, int n
                    bool allow_requantize, bool quantize_output_tensor,
                    bool pure, bool keep_split);
 int quantize_model_dry_run(const char* fname_in, int ftype, int nthread);
-void save_model_to_file(void* state_ptr, const char* path);
+bool save_model_to_file(void* state_ptr, const char* path);
 int build_split_path(char* buf, int buf_size, const char* prefix, int split_no, int split_count);
 int build_split_prefix(char* buf, int buf_size, const char* split_path, int split_no, int split_count);
 int load_mode_from_str(const char* str);

@@ -735,27 +735,35 @@ int load_state(void *ctx, char *statefile, char*modes) {
     return 0;
 }
 
-void save_state(void *ctx, char *dst, char*modes) {
+// Returns 0 on success, non-zero on failure: the file could not be opened, the
+// state could not be serialized, or the write was short.
+int save_state(void *ctx, char *dst, char*modes) {
     llama_binding_state* state = (llama_binding_state*) ctx;
     llama_context* lctx = state->ctx;
-    
+
     const size_t state_size = llama_state_get_size(lctx);
-    uint8_t * state_mem = new uint8_t[state_size];
-    
+
     FILE *fp_write = fopen(dst, modes);
     if (fp_write == nullptr) {
         fprintf(stderr, "%s: failed to open state file for writing\n", __func__);
-        delete[] state_mem;
-        return;
+        return 1;
     }
-    
-    size_t written = llama_state_get_data(lctx, state_mem, state_size);
-    if (written > 0) {
-        fwrite(state_mem, 1, written, fp_write);
+
+    // std::vector frees on every path (no leak on a throw) and its allocation
+    // failure is a catchable bad_alloc rather than an exception crossing cgo.
+    int rc = 1;
+    try {
+        std::vector<uint8_t> state_mem(state_size);
+        size_t written = llama_state_get_data(lctx, state_mem.data(), state_size);
+        if (written > 0 && fwrite(state_mem.data(), 1, written, fp_write) == written) {
+            rc = 0;
+        }
+    } catch (const std::exception &) {
+        rc = 1;
     }
-    
+
     fclose(fp_write);
-    delete[] state_mem;
+    return rc;
 }
 
 void* llama_allocate_params(const char *prompt, int seed, int threads, int tokens, int top_k,
@@ -1757,7 +1765,7 @@ bool state_save_file(void* state_ptr, const char* path, const int* tokens, int n
 // token count, which the engine rejects outright rather than truncating.
 int state_load_file(void* state_ptr, const char* path, int* tokens_out, int max_tokens) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
-    if (max_tokens < 0) {
+    if (tokens_out == nullptr || max_tokens < 0) {
         return -1;
     }
     size_t n_out = 0;
@@ -2105,13 +2113,15 @@ int lora_adapter_meta_val_str_by_index(void* state_ptr, int i, int j, char* buf,
 
 // Activated LoRA: the adapter only takes effect once the model has emitted its
 // invocation tokens. Returns the token count, or the negative of it when
-// max_tokens is too small, or -1 for an out-of-range adapter. A plain (non
-// activated) LoRA reports 0.
+// max_tokens is too small. Reports 0 both for a plain (non-activated) LoRA and
+// for an out-of-range adapter index — neither has an invocation sequence. (The
+// old -1 for out-of-range was ambiguous with the -count returned for a
+// single-token aLoRA, which made the Go wrapper drop it.)
 int lora_adapter_alora_tokens(void* state_ptr, int i, int* tokens_out, int max_tokens) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
     llama_adapter_lora* a = lora_at(state, i);
     if (a == nullptr) {
-        return -1;
+        return 0;
     }
     const int n = (int) llama_adapter_get_alora_n_invocation_tokens(a);
     if (n <= 0) {
@@ -2232,9 +2242,17 @@ int quantize_model_dry_run(const char* fname_in, int ftype, int nthread) {
     return (int) llama_model_quantize(fname_in, fname_in, &params);
 }
 
-void save_model_to_file(void* state_ptr, const char* path) {
+// Returns true on success. llama_model_save_to_file is void and throws on
+// failure; catch it so the error becomes a return value instead of an
+// exception that crosses cgo and aborts the process.
+bool save_model_to_file(void* state_ptr, const char* path) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
-    llama_model_save_to_file(state->model, path);
+    try {
+        llama_model_save_to_file(state->model, path);
+        return true;
+    } catch (const std::exception &) {
+        return false;
+    }
 }
 
 // Sharded ("split") GGUF paths. split_path builds the path of one shard from a

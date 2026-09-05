@@ -1431,6 +1431,52 @@ how much is 2+2?
 			Expect(clone.Len()).To(Equal(chain.Len()))
 		})
 	})
+	Context("Defensive guards (regression)", func() {
+		It("does not divide sequence positions by zero", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			_, err = model.Predict("The capital of France is")
+			Expect(err).ToNot(HaveOccurred())
+
+			// d <= 1 must be a no-op: d == 0 used to reach an integer division by
+			// zero in the engine and kill the process (an uncatchable SIGFPE, so
+			// the value here is that the test binary survives to the next line).
+			Expect(func() { model.MemorySeqDiv(0, 0, -1, 0) }).ToNot(Panic())
+			Expect(func() { model.MemorySeqDiv(0, 0, -1, 1) }).ToNot(Panic())
+			Expect(model.MemorySeqPosMax(0)).To(BeNumerically(">=", 0))
+		})
+
+		It("reports an error when a model cannot be written", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			// Parent directory does not exist, so the write fails; SaveModel must
+			// surface that rather than inferring success from a stale file.
+			bad := filepath.Join(GinkgoT().TempDir(), "nonexistent-dir", "model.gguf")
+			Expect(model.SaveModel(bad)).ToNot(Succeed())
+		})
+
+		It("reports an error when state cannot be written", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			bad := filepath.Join(GinkgoT().TempDir(), "nonexistent-dir", "state.bin")
+			Expect(model.SaveState(bad)).ToNot(Succeed())
+		})
+	})
 	Context("Inferencing tests with GPU (using "+testModelPath+") ", Label("gpu"), func() {
 		getModel := func() (*LLama, error) {
 			model, err := New(
