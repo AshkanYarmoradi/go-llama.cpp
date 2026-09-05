@@ -1397,13 +1397,24 @@ void perf_context_reset(void* state_ptr) {
     llama_perf_context_reset(state->ctx);
 }
 
+// llama_perf_sampler aborts the process on a null or non-chain sampler. The Go
+// wrapper only calls these on a real chain; guard null here too so the exposed
+// C API cannot abort on it (a non-null non-chain still must not be passed).
 void perf_sampler(void* smpl, double* t_sample_ms, int* n_sample) {
+    if (smpl == nullptr) {
+        if (t_sample_ms) *t_sample_ms = 0.0;
+        if (n_sample)    *n_sample    = 0;
+        return;
+    }
     const llama_perf_sampler_data d = llama_perf_sampler((const llama_sampler*) smpl);
     if (t_sample_ms) *t_sample_ms = d.t_sample_ms;
     if (n_sample)    *n_sample    = d.n_sample;
 }
 
 void perf_sampler_reset(void* smpl) {
+    if (smpl == nullptr) {
+        return;
+    }
     llama_perf_sampler_reset((llama_sampler*) smpl);
 }
 
@@ -1716,7 +1727,14 @@ long long state_set_data(void* state_ptr, const unsigned char* buf, long long bu
     if (buf == nullptr || buf_size <= 0) {
         return 0;
     }
-    return (long long) llama_state_set_data(state->ctx, buf, (size_t) buf_size);
+    // A malformed or truncated buffer makes llama.cpp throw rather than return;
+    // an exception crossing the cgo boundary aborts the process, so translate it
+    // into the 0 = failure this already reports.
+    try {
+        return (long long) llama_state_set_data(state->ctx, buf, (size_t) buf_size);
+    } catch (const std::exception &) {
+        return 0;
+    }
 }
 
 // Session files carry the prompt tokens alongside the context state, so a
@@ -1726,7 +1744,12 @@ bool state_save_file(void* state_ptr, const char* path, const int* tokens, int n
     if (n_tokens < 0) {
         return false;
     }
-    return llama_state_save_file(state->ctx, path, (const llama_token*) tokens, (size_t) n_tokens);
+    // An unwritable path makes llama.cpp throw; keep that from aborting via cgo.
+    try {
+        return llama_state_save_file(state->ctx, path, (const llama_token*) tokens, (size_t) n_tokens);
+    } catch (const std::exception &) {
+        return false;
+    }
 }
 
 // Loads a session file into the context. Returns the number of tokens read,
@@ -1738,8 +1761,14 @@ int state_load_file(void* state_ptr, const char* path, int* tokens_out, int max_
         return -1;
     }
     size_t n_out = 0;
-    if (!llama_state_load_file(state->ctx, path, (llama_token*) tokens_out,
-                               (size_t) max_tokens, &n_out)) {
+    // An unreadable or malformed file makes llama.cpp throw; keep that from
+    // crossing cgo and aborting the process.
+    try {
+        if (!llama_state_load_file(state->ctx, path, (llama_token*) tokens_out,
+                                   (size_t) max_tokens, &n_out)) {
+            return -1;
+        }
+    } catch (const std::exception &) {
         return -1;
     }
     return (int) n_out;
@@ -1767,7 +1796,12 @@ long long state_seq_set_data(void* state_ptr, const unsigned char* buf, long lon
     if (buf == nullptr || buf_size <= 0) {
         return 0;
     }
-    return (long long) llama_state_seq_set_data(state->ctx, buf, (size_t) buf_size, dest_seq_id);
+    // A malformed sequence buffer makes llama.cpp throw; translate to 0 = failure.
+    try {
+        return (long long) llama_state_seq_set_data(state->ctx, buf, (size_t) buf_size, dest_seq_id);
+    } catch (const std::exception &) {
+        return 0;
+    }
 }
 
 bool state_seq_save_file(void* state_ptr, const char* path, int seq_id, const int* tokens, int n_tokens) {
@@ -1775,8 +1809,12 @@ bool state_seq_save_file(void* state_ptr, const char* path, int seq_id, const in
     if (n_tokens < 0) {
         return false;
     }
-    return llama_state_seq_save_file(state->ctx, path, seq_id,
-                                     (const llama_token*) tokens, (size_t) n_tokens) > 0;
+    try {
+        return llama_state_seq_save_file(state->ctx, path, seq_id,
+                                         (const llama_token*) tokens, (size_t) n_tokens) > 0;
+    } catch (const std::exception &) {
+        return false;
+    }
 }
 
 // Reports how many tokens a per-sequence state file holds, without loading any
@@ -1786,7 +1824,12 @@ bool state_seq_save_file(void* state_ptr, const char* path, int seq_id, const in
 int state_seq_file_token_count(void* state_ptr, const char* path) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
     size_t n_out = 0;
-    if (llama_state_seq_load_file(state->ctx, path, 0, nullptr, 0, &n_out) == 0) {
+    // An unreadable or malformed file makes llama.cpp throw; keep it out of cgo.
+    try {
+        if (llama_state_seq_load_file(state->ctx, path, 0, nullptr, 0, &n_out) == 0) {
+            return -1;
+        }
+    } catch (const std::exception &) {
         return -1;
     }
     return (int) n_out;
@@ -1804,8 +1847,13 @@ int state_seq_load_file(void* state_ptr, const char* path, int dest_seq_id,
         return -1;
     }
     size_t n_out = 0;
-    if (llama_state_seq_load_file(state->ctx, path, dest_seq_id, (llama_token*) tokens_out,
-                                  (size_t) max_tokens, &n_out) == 0) {
+    // An unreadable or malformed file makes llama.cpp throw; keep it out of cgo.
+    try {
+        if (llama_state_seq_load_file(state->ctx, path, dest_seq_id, (llama_token*) tokens_out,
+                                      (size_t) max_tokens, &n_out) == 0) {
+            return -1;
+        }
+    } catch (const std::exception &) {
         return -1;
     }
     return (int) n_out;
@@ -2310,7 +2358,16 @@ long long state_seq_set_data_ext(void* state_ptr, const unsigned char* buf, long
     if (buf == nullptr || buf_size <= 0) {
         return 0;
     }
-    return (long long) llama_state_seq_set_data_ext(state->ctx, buf, (size_t) buf_size, dest_seq_id, flags);
+    // With SeqStateOnDevice, llama.cpp validates the header before its own
+    // try block and throws on a bad magic; without this guard that exception
+    // crosses cgo and aborts. Translate it into 0 = failure, matching the
+    // flags=0 path. (A seq-id mismatch trips a GGML_ASSERT upstream, which
+    // abort()s and cannot be caught here.)
+    try {
+        return (long long) llama_state_seq_set_data_ext(state->ctx, buf, (size_t) buf_size, dest_seq_id, flags);
+    } catch (const std::exception &) {
+        return 0;
+    }
 }
 
 static_assert(LLAMA_STATE_SEQ_FLAGS_NONE         == 0, "SeqStateAll out of sync with llama.go");

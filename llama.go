@@ -231,10 +231,10 @@ func adapterString(fn func(buf []byte) int) string {
 	if ret < 0 {
 		return ""
 	}
-	if ret > len(buf) {
+	if ret >= len(buf) {
 		buf = make([]byte, ret+1)
 		ret = fn(buf)
-		if ret < 0 || ret > len(buf) {
+		if ret < 0 || ret >= len(buf) {
 			return ""
 		}
 	}
@@ -656,14 +656,22 @@ type SamplerPerf struct {
 // Perf returns the chain's sampling counters. It reports zeroes for a stage
 // that was not created by NewSamplerChain.
 func (s *Sampler) Perf() SamplerPerf {
+	if !s.chain {
+		return SamplerPerf{}
+	}
 	var tSample C.double
 	var nSample C.int
 	C.perf_sampler(s.ptr, &tSample, &nSample)
 	return SamplerPerf{SampleMS: float64(tSample), Samples: int(nSample)}
 }
 
-// PerfReset zeroes the chain's sampling counters.
-func (s *Sampler) PerfReset() { C.perf_sampler_reset(s.ptr) }
+// PerfReset zeroes the chain's sampling counters. It is a no-op on a stage that
+// was not created by NewSamplerChain.
+func (s *Sampler) PerfReset() {
+	if s.chain {
+		C.perf_sampler_reset(s.ptr)
+	}
+}
 
 // Version returns the version string of the linked llama.cpp library.
 func Version() string { return C.GoString(C.llama_version_str()) }
@@ -678,6 +686,13 @@ func TimeUS() int64 { return int64(C.llama_time_us_val()) }
 // chain from NewSamplerChain, then Sample from a decoded context.
 type Sampler struct {
 	ptr unsafe.Pointer
+	// chain is true only for a chain created by NewSamplerChain (or a clone of
+	// one). The chain-only operations — Add, Remove, At, Len, Perf, PerfReset —
+	// are meaningful only on a chain, and llama.cpp does not check: it
+	// reinterprets a single stage's context as a chain (Len returns garbage and
+	// Remove corrupts the heap) and llama_perf_sampler aborts the process on a
+	// non-chain. These methods guard on this flag so a stage is a safe no-op.
+	chain bool
 }
 
 // LogLevel is the severity of a llama.cpp log record.
@@ -773,13 +788,13 @@ func goLogCallback(level C.int, text *C.char) {
 
 // NewSamplerChain creates an empty sampler chain. The chain takes ownership of
 // every stage added to it and frees them all when the chain's Free is called.
-func NewSamplerChain() *Sampler { return &Sampler{ptr: C.sampler_chain_init()} }
+func NewSamplerChain() *Sampler { return &Sampler{ptr: C.sampler_chain_init(), chain: true} }
 
 // Add appends a stage to the chain, transferring ownership of the stage to the
 // chain. Do not call Free on a stage after adding it. A nil or empty stage is
-// ignored (e.g. an invalid grammar).
+// ignored (e.g. an invalid grammar). It is a no-op if s is not a chain.
 func (s *Sampler) Add(stage *Sampler) {
-	if stage == nil || stage.ptr == nil {
+	if !s.chain || stage == nil || stage.ptr == nil {
 		return
 	}
 	C.sampler_chain_add(s.ptr, stage.ptr)
@@ -933,13 +948,18 @@ func (l *LLama) SamplerGrammarLazy(grammar, root string, triggerPatterns []strin
 }
 
 // Len returns the number of stages in a chain, or 0 for a single stage.
-func (s *Sampler) Len() int { return int(C.sampler_chain_n(s.ptr)) }
+func (s *Sampler) Len() int {
+	if !s.chain {
+		return 0
+	}
+	return int(C.sampler_chain_n(s.ptr))
+}
 
 // At returns the i-th stage of a chain without transferring ownership: the
 // returned Sampler must not be freed, and becomes invalid when the chain is.
-// It returns nil if i is out of range.
+// It returns nil if i is out of range or s is not a chain.
 func (s *Sampler) At(i int) *Sampler {
-	if i < 0 || i >= s.Len() {
+	if !s.chain || i < 0 || i >= s.Len() {
 		return nil
 	}
 	p := C.sampler_chain_get(s.ptr, C.int(i))
@@ -950,9 +970,10 @@ func (s *Sampler) At(i int) *Sampler {
 }
 
 // Remove detaches the i-th stage from a chain and transfers ownership of it to
-// the caller, who must Free it. It returns nil if i is out of range.
+// the caller, who must Free it. It returns nil if i is out of range or s is not
+// a chain.
 func (s *Sampler) Remove(i int) *Sampler {
-	if i < 0 || i >= s.Len() {
+	if !s.chain || i < 0 || i >= s.Len() {
 		return nil
 	}
 	p := C.sampler_chain_remove(s.ptr, C.int(i))
@@ -976,7 +997,7 @@ func (s *Sampler) Remove(i int) *Sampler {
 func (s *Sampler) Name() string {
 	buf := make([]byte, 64)
 	ret := int(C.sampler_name(s.ptr, (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
-	if ret <= 0 || ret > len(buf) {
+	if ret <= 0 || ret >= len(buf) {
 		return ""
 	}
 	return string(buf[:ret])
@@ -994,7 +1015,7 @@ func (s *Sampler) Clone() *Sampler {
 	if p == nil {
 		return nil
 	}
-	return &Sampler{ptr: p}
+	return &Sampler{ptr: p, chain: s.chain}
 }
 
 // Seed returns the RNG seed a stage was built with, or DefaultSeed for a stage
@@ -1149,11 +1170,11 @@ func (l *LLama) TokenText(token int32) string {
 	if ret <= 0 {
 		return ""
 	}
-	if ret > len(buf) {
+	if ret >= len(buf) {
 		buf = make([]byte, ret+1)
 		ret = int(C.get_vocab_token_text(l.state, C.int(token),
 			(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
-		if ret <= 0 || ret > len(buf) {
+		if ret <= 0 || ret >= len(buf) {
 			return ""
 		}
 	}
@@ -1303,7 +1324,7 @@ func (l *LLama) Architecture() Architecture {
 		for i := 0; i < n; i++ {
 			ret := int(C.get_model_cls_label(l.state, C.int(i),
 				(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
-			if ret <= 0 || ret > len(buf) {
+			if ret <= 0 || ret >= len(buf) {
 				continue
 			}
 			a.ClassifierLabels = append(a.ClassifierLabels, string(buf[:ret]))
@@ -1317,7 +1338,7 @@ func (l *LLama) Architecture() Architecture {
 func FileTypeName(ftype int) string {
 	buf := make([]byte, 128)
 	ret := int(C.ftype_name(C.int(ftype), (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
-	if ret <= 0 || ret > len(buf) {
+	if ret <= 0 || ret >= len(buf) {
 		return ""
 	}
 	return string(buf[:ret])
@@ -1327,7 +1348,7 @@ func FileTypeName(ftype int) string {
 func FlashAttnTypeName(t int) string {
 	buf := make([]byte, 128)
 	ret := int(C.flash_attn_type_name(C.int(t), (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
-	if ret <= 0 || ret > len(buf) {
+	if ret <= 0 || ret >= len(buf) {
 		return ""
 	}
 	return string(buf[:ret])
@@ -1485,11 +1506,11 @@ func BuiltinChatTemplates() []string {
 		if ret <= 0 {
 			continue
 		}
-		if ret > len(buf) {
+		if ret >= len(buf) {
 			buf = make([]byte, ret+1)
 			ret = int(C.chat_builtin_template_name(C.int(i),
 				(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
-			if ret <= 0 {
+			if ret <= 0 || ret >= len(buf) {
 				continue
 			}
 		}
@@ -1516,10 +1537,10 @@ func (l *LLama) GetChatTemplate(name string) string {
 	if ret <= 0 {
 		return ""
 	}
-	if ret > len(buf) {
+	if ret >= len(buf) {
 		buf = make([]byte, ret+1)
 		ret = int(C.get_model_chat_template(l.state, cName, (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
-		if ret <= 0 || ret > len(buf) {
+		if ret <= 0 || ret >= len(buf) {
 			return ""
 		}
 	}
@@ -1648,7 +1669,7 @@ const (
 func (m LoadMode) String() string {
 	buf := make([]byte, 64)
 	ret := int(C.load_mode_name(C.int(m), (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
-	if ret <= 0 || ret > len(buf) {
+	if ret <= 0 || ret >= len(buf) {
 		return fmt.Sprintf("LoadMode(%d)", int(m))
 	}
 	return string(buf[:ret])
@@ -1740,7 +1761,7 @@ func SplitPath(prefix string, splitNo, splitCount int) string {
 	buf := make([]byte, 1024)
 	ret := int(C.build_split_path((*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)),
 		cPrefix, C.int(splitNo), C.int(splitCount)))
-	if ret <= 0 || ret > len(buf) {
+	if ret <= 0 || ret >= len(buf) {
 		return ""
 	}
 	return string(buf[:ret])
@@ -1756,7 +1777,7 @@ func SplitPrefix(path string, splitNo, splitCount int) string {
 	buf := make([]byte, 1024)
 	ret := int(C.build_split_prefix((*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)),
 		cPath, C.int(splitNo), C.int(splitCount)))
-	if ret <= 0 || ret > len(buf) {
+	if ret <= 0 || ret >= len(buf) {
 		return ""
 	}
 	return string(buf[:ret])
