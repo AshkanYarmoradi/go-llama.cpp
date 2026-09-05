@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/AshkanYarmoradi/go-llama.cpp"
 	. "github.com/AshkanYarmoradi/go-llama.cpp"
@@ -1121,6 +1122,95 @@ how much is 2+2?
 			Expect(out).ToNot(BeEmpty())
 
 			Expect(model.ClearControlVector()).To(Succeed())
+		})
+	})
+
+	Context("Log routing", func() {
+		AfterEach(func() {
+			// The engine's logger is global, so always hand it back.
+			SetLogHandler(nil)
+		})
+
+		It("names the log levels", func() {
+			Expect(LogLevelInfo.String()).To(Equal("INFO"))
+			Expect(LogLevelError.String()).To(Equal("ERROR"))
+			Expect(LogLevelCont.String()).To(Equal("CONT"))
+			Expect(LogLevel(42).String()).To(ContainSubstring("42"))
+		})
+
+		It("installs and removes the handler", func() {
+			SetLogHandler(func(LogLevel, string) {})
+			Expect(LogHandlerInstalled()).To(BeTrue())
+
+			// SetLogHandler(nil) hands the logger back to llama.cpp: the engine
+			// installs its own stderr default rather than clearing the callback,
+			// so "not installed" here means "not ours", not "no logging".
+			SetLogHandler(nil)
+			Expect(LogHandlerInstalled()).To(BeFalse())
+		})
+
+		It("captures the engine's output during a model load", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			var mu sync.Mutex
+			var records []string
+			var levels []LogLevel
+
+			SetLogHandler(func(l LogLevel, text string) {
+				mu.Lock()
+				defer mu.Unlock()
+				records = append(records, text)
+				levels = append(levels, l)
+			})
+
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			model.Free()
+
+			mu.Lock()
+			defer mu.Unlock()
+			// Loading a model is chatty; if nothing arrived the bridge is not wired.
+			Expect(records).ToNot(BeEmpty())
+			Expect(strings.Join(records, "")).To(ContainSubstring("llama"))
+			for _, l := range levels {
+				Expect(l).To(BeNumerically(">=", LogLevelNone))
+				Expect(l).To(BeNumerically("<=", LogLevelCont))
+			}
+		})
+
+		It("stops delivering after the handler is removed", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+
+			var mu sync.Mutex
+			count := 0
+			SetLogHandler(func(LogLevel, string) {
+				mu.Lock()
+				defer mu.Unlock()
+				count++
+			})
+
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			model.Free()
+
+			mu.Lock()
+			afterFirst := count
+			mu.Unlock()
+			Expect(afterFirst).To(BeNumerically(">", 0))
+
+			SetLogHandler(nil)
+
+			model2, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			model2.Free()
+
+			mu.Lock()
+			defer mu.Unlock()
+			Expect(count).To(Equal(afterFirst), "handler was called after being removed")
 		})
 	})
 	Context("Inferencing tests with GPU (using "+testModelPath+") ", Label("gpu"), func() {

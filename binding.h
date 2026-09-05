@@ -8,6 +8,14 @@ extern "C" {
 
 extern unsigned char tokenCallback(void *, char *);
 
+// Log routing. set_log_callback(true) installs a bridge that forwards every
+// llama.cpp log record to goLogCallback; set_log_callback(false) restores the
+// engine's own stderr output. The engine's logger state is global and not
+// thread safe, so the Go layer serializes these calls.
+extern void goLogCallback(int level, char* text);
+void set_log_callback(bool enable);
+bool has_log_callback(void);
+
 int load_state(void *ctx, char *statefile, char*modes);
 
 void save_state(void *ctx, char *dst, char*modes);

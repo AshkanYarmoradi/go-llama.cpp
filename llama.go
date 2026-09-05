@@ -640,6 +640,97 @@ type Sampler struct {
 	ptr unsafe.Pointer
 }
 
+// LogLevel is the severity of a llama.cpp log record.
+type LogLevel int
+
+// Log severities, mirroring ggml_log_level.
+const (
+	LogLevelNone  LogLevel = 0
+	LogLevelDebug LogLevel = 1
+	LogLevelInfo  LogLevel = 2
+	LogLevelWarn  LogLevel = 3
+	LogLevelError LogLevel = 4
+	// LogLevelCont continues the previous record rather than starting a new
+	// one. llama.cpp uses it to build a line in pieces, so a handler that
+	// prefixes each record with a timestamp or level should skip the prefix
+	// for these.
+	LogLevelCont LogLevel = 5
+)
+
+// String returns a short uppercase name for the level.
+func (l LogLevel) String() string {
+	switch l {
+	case LogLevelNone:
+		return "NONE"
+	case LogLevelDebug:
+		return "DEBUG"
+	case LogLevelInfo:
+		return "INFO"
+	case LogLevelWarn:
+		return "WARN"
+	case LogLevelError:
+		return "ERROR"
+	case LogLevelCont:
+		return "CONT"
+	default:
+		return fmt.Sprintf("LogLevel(%d)", int(l))
+	}
+}
+
+var (
+	logMu      sync.RWMutex
+	logHandler func(LogLevel, string)
+)
+
+// SetLogHandler routes llama.cpp's log output to fn instead of stderr. The
+// engine is chatty — model loading alone produces dozens of lines — so this is
+// how that output gets into a real logger, filtered by level, or silenced.
+//
+// Pass nil to restore llama.cpp's own stderr output.
+//
+// The text arrives exactly as the engine emits it, including its trailing
+// newline, and a record may be a fragment: see LogLevelCont.
+//
+// The handler is called from whatever thread the engine is running on,
+// including during New and Predict, so it must be safe for concurrent use and
+// should not call back into this package.
+//
+// llama.cpp's logger state is global, so this affects every model in the
+// process, not just one.
+func SetLogHandler(fn func(level LogLevel, text string)) {
+	logMu.Lock()
+	defer logMu.Unlock()
+
+	logHandler = fn
+	C.set_log_callback(C.bool(fn != nil))
+}
+
+// LogHandlerInstalled reports whether llama.cpp is currently routing its log
+// output through this package.
+//
+// It asks the engine rather than trusting local state, so it also returns
+// false when other code in the process has taken the logger over — llama.cpp's
+// logger is global, and the last caller to set it wins.
+//
+// Note that "not installed" does not mean "no logging": SetLogHandler(nil)
+// restores llama.cpp's own stderr output rather than silencing it. To silence
+// the engine, install a handler that discards.
+func LogHandlerInstalled() bool {
+	return bool(C.has_log_callback())
+}
+
+//export goLogCallback
+func goLogCallback(level C.int, text *C.char) {
+	logMu.RLock()
+	fn := logHandler
+	logMu.RUnlock()
+
+	if fn == nil {
+		return
+	}
+	fn(LogLevel(level), C.GoString(text))
+}
+
 // NewSamplerChain creates an empty sampler chain. The chain takes ownership of
 // every stage added to it and frees them all when the chain's Free is called.
 func NewSamplerChain() *Sampler { return &Sampler{ptr: C.sampler_chain_init()} }
