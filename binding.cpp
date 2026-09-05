@@ -735,27 +735,35 @@ int load_state(void *ctx, char *statefile, char*modes) {
     return 0;
 }
 
-void save_state(void *ctx, char *dst, char*modes) {
+// Returns 0 on success, non-zero on failure: the file could not be opened, the
+// state could not be serialized, or the write was short.
+int save_state(void *ctx, char *dst, char*modes) {
     llama_binding_state* state = (llama_binding_state*) ctx;
     llama_context* lctx = state->ctx;
-    
+
     const size_t state_size = llama_state_get_size(lctx);
-    uint8_t * state_mem = new uint8_t[state_size];
-    
+
     FILE *fp_write = fopen(dst, modes);
     if (fp_write == nullptr) {
         fprintf(stderr, "%s: failed to open state file for writing\n", __func__);
-        delete[] state_mem;
-        return;
+        return 1;
     }
-    
-    size_t written = llama_state_get_data(lctx, state_mem, state_size);
-    if (written > 0) {
-        fwrite(state_mem, 1, written, fp_write);
+
+    // std::vector frees on every path (no leak on a throw) and its allocation
+    // failure is a catchable bad_alloc rather than an exception crossing cgo.
+    int rc = 1;
+    try {
+        std::vector<uint8_t> state_mem(state_size);
+        size_t written = llama_state_get_data(lctx, state_mem.data(), state_size);
+        if (written > 0 && fwrite(state_mem.data(), 1, written, fp_write) == written) {
+            rc = 0;
+        }
+    } catch (const std::exception &) {
+        rc = 1;
     }
-    
+
     fclose(fp_write);
-    delete[] state_mem;
+    return rc;
 }
 
 void* llama_allocate_params(const char *prompt, int seed, int threads, int tokens, int top_k,
@@ -1397,13 +1405,24 @@ void perf_context_reset(void* state_ptr) {
     llama_perf_context_reset(state->ctx);
 }
 
+// llama_perf_sampler aborts the process on a null or non-chain sampler. The Go
+// wrapper only calls these on a real chain; guard null here too so the exposed
+// C API cannot abort on it (a non-null non-chain still must not be passed).
 void perf_sampler(void* smpl, double* t_sample_ms, int* n_sample) {
+    if (smpl == nullptr) {
+        if (t_sample_ms) *t_sample_ms = 0.0;
+        if (n_sample)    *n_sample    = 0;
+        return;
+    }
     const llama_perf_sampler_data d = llama_perf_sampler((const llama_sampler*) smpl);
     if (t_sample_ms) *t_sample_ms = d.t_sample_ms;
     if (n_sample)    *n_sample    = d.n_sample;
 }
 
 void perf_sampler_reset(void* smpl) {
+    if (smpl == nullptr) {
+        return;
+    }
     llama_perf_sampler_reset((llama_sampler*) smpl);
 }
 
@@ -1716,7 +1735,14 @@ long long state_set_data(void* state_ptr, const unsigned char* buf, long long bu
     if (buf == nullptr || buf_size <= 0) {
         return 0;
     }
-    return (long long) llama_state_set_data(state->ctx, buf, (size_t) buf_size);
+    // A malformed or truncated buffer makes llama.cpp throw rather than return;
+    // an exception crossing the cgo boundary aborts the process, so translate it
+    // into the 0 = failure this already reports.
+    try {
+        return (long long) llama_state_set_data(state->ctx, buf, (size_t) buf_size);
+    } catch (const std::exception &) {
+        return 0;
+    }
 }
 
 // Session files carry the prompt tokens alongside the context state, so a
@@ -1726,7 +1752,12 @@ bool state_save_file(void* state_ptr, const char* path, const int* tokens, int n
     if (n_tokens < 0) {
         return false;
     }
-    return llama_state_save_file(state->ctx, path, (const llama_token*) tokens, (size_t) n_tokens);
+    // An unwritable path makes llama.cpp throw; keep that from aborting via cgo.
+    try {
+        return llama_state_save_file(state->ctx, path, (const llama_token*) tokens, (size_t) n_tokens);
+    } catch (const std::exception &) {
+        return false;
+    }
 }
 
 // Loads a session file into the context. Returns the number of tokens read,
@@ -1734,12 +1765,18 @@ bool state_save_file(void* state_ptr, const char* path, const int* tokens, int n
 // token count, which the engine rejects outright rather than truncating.
 int state_load_file(void* state_ptr, const char* path, int* tokens_out, int max_tokens) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
-    if (max_tokens < 0) {
+    if (tokens_out == nullptr || max_tokens < 0) {
         return -1;
     }
     size_t n_out = 0;
-    if (!llama_state_load_file(state->ctx, path, (llama_token*) tokens_out,
-                               (size_t) max_tokens, &n_out)) {
+    // An unreadable or malformed file makes llama.cpp throw; keep that from
+    // crossing cgo and aborting the process.
+    try {
+        if (!llama_state_load_file(state->ctx, path, (llama_token*) tokens_out,
+                                   (size_t) max_tokens, &n_out)) {
+            return -1;
+        }
+    } catch (const std::exception &) {
         return -1;
     }
     return (int) n_out;
@@ -1767,7 +1804,12 @@ long long state_seq_set_data(void* state_ptr, const unsigned char* buf, long lon
     if (buf == nullptr || buf_size <= 0) {
         return 0;
     }
-    return (long long) llama_state_seq_set_data(state->ctx, buf, (size_t) buf_size, dest_seq_id);
+    // A malformed sequence buffer makes llama.cpp throw; translate to 0 = failure.
+    try {
+        return (long long) llama_state_seq_set_data(state->ctx, buf, (size_t) buf_size, dest_seq_id);
+    } catch (const std::exception &) {
+        return 0;
+    }
 }
 
 bool state_seq_save_file(void* state_ptr, const char* path, int seq_id, const int* tokens, int n_tokens) {
@@ -1775,8 +1817,12 @@ bool state_seq_save_file(void* state_ptr, const char* path, int seq_id, const in
     if (n_tokens < 0) {
         return false;
     }
-    return llama_state_seq_save_file(state->ctx, path, seq_id,
-                                     (const llama_token*) tokens, (size_t) n_tokens) > 0;
+    try {
+        return llama_state_seq_save_file(state->ctx, path, seq_id,
+                                         (const llama_token*) tokens, (size_t) n_tokens) > 0;
+    } catch (const std::exception &) {
+        return false;
+    }
 }
 
 // Reports how many tokens a per-sequence state file holds, without loading any
@@ -1786,7 +1832,12 @@ bool state_seq_save_file(void* state_ptr, const char* path, int seq_id, const in
 int state_seq_file_token_count(void* state_ptr, const char* path) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
     size_t n_out = 0;
-    if (llama_state_seq_load_file(state->ctx, path, 0, nullptr, 0, &n_out) == 0) {
+    // An unreadable or malformed file makes llama.cpp throw; keep it out of cgo.
+    try {
+        if (llama_state_seq_load_file(state->ctx, path, 0, nullptr, 0, &n_out) == 0) {
+            return -1;
+        }
+    } catch (const std::exception &) {
         return -1;
     }
     return (int) n_out;
@@ -1804,8 +1855,13 @@ int state_seq_load_file(void* state_ptr, const char* path, int dest_seq_id,
         return -1;
     }
     size_t n_out = 0;
-    if (llama_state_seq_load_file(state->ctx, path, dest_seq_id, (llama_token*) tokens_out,
-                                  (size_t) max_tokens, &n_out) == 0) {
+    // An unreadable or malformed file makes llama.cpp throw; keep it out of cgo.
+    try {
+        if (llama_state_seq_load_file(state->ctx, path, dest_seq_id, (llama_token*) tokens_out,
+                                      (size_t) max_tokens, &n_out) == 0) {
+            return -1;
+        }
+    } catch (const std::exception &) {
         return -1;
     }
     return (int) n_out;
@@ -2057,13 +2113,15 @@ int lora_adapter_meta_val_str_by_index(void* state_ptr, int i, int j, char* buf,
 
 // Activated LoRA: the adapter only takes effect once the model has emitted its
 // invocation tokens. Returns the token count, or the negative of it when
-// max_tokens is too small, or -1 for an out-of-range adapter. A plain (non
-// activated) LoRA reports 0.
+// max_tokens is too small. Reports 0 both for a plain (non-activated) LoRA and
+// for an out-of-range adapter index — neither has an invocation sequence. (The
+// old -1 for out-of-range was ambiguous with the -count returned for a
+// single-token aLoRA, which made the Go wrapper drop it.)
 int lora_adapter_alora_tokens(void* state_ptr, int i, int* tokens_out, int max_tokens) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
     llama_adapter_lora* a = lora_at(state, i);
     if (a == nullptr) {
-        return -1;
+        return 0;
     }
     const int n = (int) llama_adapter_get_alora_n_invocation_tokens(a);
     if (n <= 0) {
@@ -2184,9 +2242,17 @@ int quantize_model_dry_run(const char* fname_in, int ftype, int nthread) {
     return (int) llama_model_quantize(fname_in, fname_in, &params);
 }
 
-void save_model_to_file(void* state_ptr, const char* path) {
+// Returns true on success. llama_model_save_to_file is void and throws on
+// failure; catch it so the error becomes a return value instead of an
+// exception that crosses cgo and aborts the process.
+bool save_model_to_file(void* state_ptr, const char* path) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
-    llama_model_save_to_file(state->model, path);
+    try {
+        llama_model_save_to_file(state->model, path);
+        return true;
+    } catch (const std::exception &) {
+        return false;
+    }
 }
 
 // Sharded ("split") GGUF paths. split_path builds the path of one shard from a
@@ -2310,7 +2376,16 @@ long long state_seq_set_data_ext(void* state_ptr, const unsigned char* buf, long
     if (buf == nullptr || buf_size <= 0) {
         return 0;
     }
-    return (long long) llama_state_seq_set_data_ext(state->ctx, buf, (size_t) buf_size, dest_seq_id, flags);
+    // With SeqStateOnDevice, llama.cpp validates the header before its own
+    // try block and throws on a bad magic; without this guard that exception
+    // crosses cgo and aborts. Translate it into 0 = failure, matching the
+    // flags=0 path. (A seq-id mismatch trips a GGML_ASSERT upstream, which
+    // abort()s and cannot be caught here.)
+    try {
+        return (long long) llama_state_seq_set_data_ext(state->ctx, buf, (size_t) buf_size, dest_seq_id, flags);
+    } catch (const std::exception &) {
+        return 0;
+    }
 }
 
 static_assert(LLAMA_STATE_SEQ_FLAGS_NONE         == 0, "SeqStateAll out of sync with llama.go");
