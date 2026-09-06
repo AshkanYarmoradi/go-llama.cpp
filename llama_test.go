@@ -1379,6 +1379,104 @@ how much is 2+2?
 			Expect(model.SetSequenceStateDataWith(nil, 0, SeqStateAll)).To(HaveOccurred())
 		})
 	})
+	Context("Sampler chain safety", func() {
+		// Regression: chain-only operations on a single stage used to reinterpret
+		// the stage's context as a chain — Len returned garbage and Remove
+		// corrupted the heap — while Perf/PerfReset called llama_perf_sampler,
+		// which aborts the whole process on a non-chain. They must now be safe
+		// no-ops. None of this needs a loaded model.
+		It("treats a single stage's chain operations as safe no-ops", func() {
+			s := SamplerTopK(40)
+			defer s.Free()
+
+			Expect(s.Len()).To(Equal(0))
+			Expect(s.At(0)).To(BeNil())
+			Expect(s.Remove(0)).To(BeNil())
+			Expect(s.Perf()).To(Equal(SamplerPerf{}))
+			Expect(func() { s.PerfReset() }).ToNot(Panic())
+
+			// Add to a non-chain is ignored: the stage is not consumed, so it is
+			// still ours to Free (a double-free here would signal a botched guard).
+			orphan := SamplerTemp(0.8)
+			defer orphan.Free()
+			Expect(func() { s.Add(orphan) }).ToNot(Panic())
+
+			Expect(s.Name()).ToNot(BeEmpty())
+		})
+
+		It("reports and indexes stages on a real chain", func() {
+			chain := NewSamplerChain()
+			defer chain.Free()
+			chain.Add(SamplerTopK(40))
+			chain.Add(SamplerTopP(0.95, 1))
+			chain.Add(SamplerTemp(0.8))
+
+			Expect(chain.Len()).To(Equal(3))
+			Expect(chain.At(0)).ToNot(BeNil())
+			Expect(chain.At(2)).ToNot(BeNil())
+			Expect(chain.At(3)).To(BeNil())
+			Expect(func() { chain.Perf() }).ToNot(Panic())
+			Expect(func() { chain.PerfReset() }).ToNot(Panic())
+		})
+
+		It("preserves chain semantics across Clone", func() {
+			chain := NewSamplerChain()
+			defer chain.Free()
+			chain.Add(SamplerTopK(40))
+			chain.Add(SamplerTemp(0.8))
+
+			clone := chain.Clone()
+			Expect(clone).ToNot(BeNil())
+			defer clone.Free()
+			Expect(clone.Len()).To(Equal(chain.Len()))
+		})
+	})
+	Context("Defensive guards (regression)", func() {
+		It("does not divide sequence positions by zero", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			_, err = model.Predict("The capital of France is")
+			Expect(err).ToNot(HaveOccurred())
+
+			// d <= 1 must be a no-op: d == 0 used to reach an integer division by
+			// zero in the engine and kill the process (an uncatchable SIGFPE, so
+			// the value here is that the test binary survives to the next line).
+			Expect(func() { model.MemorySeqDiv(0, 0, -1, 0) }).ToNot(Panic())
+			Expect(func() { model.MemorySeqDiv(0, 0, -1, 1) }).ToNot(Panic())
+			Expect(model.MemorySeqPosMax(0)).To(BeNumerically(">=", 0))
+		})
+
+		It("reports an error when a model cannot be written", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			// Parent directory does not exist, so the write fails; SaveModel must
+			// surface that rather than inferring success from a stale file.
+			bad := filepath.Join(GinkgoT().TempDir(), "nonexistent-dir", "model.gguf")
+			Expect(model.SaveModel(bad)).ToNot(Succeed())
+		})
+
+		It("reports an error when state cannot be written", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
+
+			bad := filepath.Join(GinkgoT().TempDir(), "nonexistent-dir", "state.bin")
+			Expect(model.SaveState(bad)).ToNot(Succeed())
+		})
+	})
 	Context("Inferencing tests with GPU (using "+testModelPath+") ", Label("gpu"), func() {
 		getModel := func() (*LLama, error) {
 			model, err := New(
