@@ -1750,6 +1750,12 @@ func QuantizeDryRun(in string, fileType, threads int) error {
 
 // SaveModel writes the loaded model back out as a GGUF file. Its main use is
 // persisting a model after adapters or overrides have been applied.
+//
+// The engine's own save function returns nothing and swallows the failure of
+// the underlying GGUF write, so success is determined from the artifact: the
+// file must exist and be non-empty when the call returns. A write that fails
+// partway — a full disk, say — leaves a partial file that cannot be told apart
+// from a good one without re-parsing it, so this reports success in that case.
 func (l *LLama) SaveModel(path string) error {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))

@@ -2242,17 +2242,39 @@ int quantize_model_dry_run(const char* fname_in, int ftype, int nthread) {
     return (int) llama_model_quantize(fname_in, fname_in, &params);
 }
 
-// Returns true on success. llama_model_save_to_file is void and throws on
-// failure; catch it so the error becomes a return value instead of an
-// exception that crosses cgo and aborts the process.
+// Returns true only when the file was actually produced.
+//
+// llama_model_save_to_file is void and does not report a failed write: when the
+// output cannot be opened, gguf_write_to_file logs the error and returns false,
+// and the engine discards that return value. So the artifact is the only signal
+// available — the file has to exist and be non-empty afterwards.
+//
+// The try/catch stays because allocation inside the saver can still throw, and
+// an exception crossing cgo aborts the process.
+//
+// Known limit: a write that fails partway, such as a full disk, leaves a
+// non-empty partial file and cannot be told apart from success here without
+// re-parsing the GGUF.
 bool save_model_to_file(void* state_ptr, const char* path) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
-    try {
-        llama_model_save_to_file(state->model, path);
-        return true;
-    } catch (const std::exception &) {
+    if (state == nullptr || path == nullptr || path[0] == '\0') {
         return false;
     }
+
+    try {
+        llama_model_save_to_file(state->model, path);
+    } catch (const std::exception & e) {
+        fprintf(stderr, "%s: %s\n", __func__, e.what());
+        return false;
+    }
+
+    FILE* f = fopen(path, "rb");
+    if (f == nullptr) {
+        return false;
+    }
+    const long size = (fseek(f, 0, SEEK_END) == 0) ? ftell(f) : -1;
+    fclose(f);
+    return size > 0;
 }
 
 // Sharded ("split") GGUF paths. split_path builds the path of one shard from a
