@@ -42,7 +42,7 @@ deprecated are not exposed — the binding wraps the replacement instead.
 
 | | |
 |---|---|
-| **Go** | 1.25 or newer (the `go` directive in `go.mod`; older toolchains will fetch it) |
+| **Go** | 1.26 or newer (the `go` directive in `go.mod`; older toolchains will fetch it) |
 | **C++ compiler** | GCC, Clang, or Apple Clang, with C++17 support |
 | **CMake** | 3.14+ (builds the vendored llama.cpp) |
 | **Optional** | CUDA Toolkit, ROCm, or Xcode for GPU backends |
