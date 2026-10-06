@@ -1653,11 +1653,11 @@ int ftype_name(int ftype, char* buf, int buf_size) {
 }
 
 int flash_attn_type_name(int type, char* buf, int buf_size) {
-    const char* name = llama_flash_attn_type_name((enum llama_flash_attn_type) type);
-    if (name == nullptr) {
+    // llama_flash_attn_type_name aborts on a value outside the enum.
+    if (type < LLAMA_FLASH_ATTN_TYPE_AUTO || type > LLAMA_FLASH_ATTN_TYPE_ENABLED) {
         return -1;
     }
-    return snprintf(buf, (size_t) buf_size, "%s", name);
+    return snprintf(buf, (size_t) buf_size, "%s", llama_flash_attn_type_name((enum llama_flash_attn_type) type));
 }
 
 //

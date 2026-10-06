@@ -1344,7 +1344,8 @@ func (l *LLama) Architecture() Architecture {
 }
 
 // FileTypeName returns llama.cpp's name for a llama_ftype value, for example
-// "Q4_K - Medium". It returns "" for an unrecognised value.
+// "Q4_K - Medium". An unrecognised value gets llama.cpp's own placeholder,
+// "unknown, may not work".
 func FileTypeName(ftype int) string {
 	buf := make([]byte, 128)
 	ret := int(C.ftype_name(C.int(ftype), (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
@@ -1355,6 +1356,7 @@ func FileTypeName(ftype int) string {
 }
 
 // FlashAttnTypeName returns llama.cpp's name for a llama_flash_attn_type value.
+// It returns "" for an unrecognised value.
 func FlashAttnTypeName(t int) string {
 	buf := make([]byte, 128)
 	ret := int(C.flash_attn_type_name(C.int(t), (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
@@ -1675,7 +1677,8 @@ const (
 )
 
 // String returns llama.cpp's name for the mode, which is also what
-// ParseLoadMode accepts.
+// ParseLoadMode accepts. A value llama.cpp does not define renders as
+// "LoadMode(n)".
 func (m LoadMode) String() string {
 	buf := make([]byte, 64)
 	ret := int(C.load_mode_name(C.int(m), (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))

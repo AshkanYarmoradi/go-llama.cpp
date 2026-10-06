@@ -549,6 +549,10 @@ how much is 2+2?
 		It("names enum values without a model", func() {
 			// LLAMA_FTYPE_ALL_F32 == 0 is stable across every llama.cpp release.
 			Expect(FileTypeName(0)).ToNot(BeEmpty())
+			Expect(FlashAttnTypeName(-1)).To(Equal("auto"))
+			// The engine aborts on a value outside the enum, so the binding
+			// must answer for it.
+			Expect(FlashAttnTypeName(99)).To(BeEmpty())
 			Expect(VocabSPM.String()).To(Equal("spm"))
 			Expect(RopeNeox.String()).To(Equal("neox"))
 			Expect(PoolingMean.String()).To(Equal("mean"))
