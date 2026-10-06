@@ -549,6 +549,10 @@ how much is 2+2?
 		It("names enum values without a model", func() {
 			// LLAMA_FTYPE_ALL_F32 == 0 is stable across every llama.cpp release.
 			Expect(FileTypeName(0)).ToNot(BeEmpty())
+			Expect(FlashAttnTypeName(-1)).To(Equal("auto"))
+			// The engine aborts on a value outside the enum, so the binding
+			// must answer for it.
+			Expect(FlashAttnTypeName(99)).To(BeEmpty())
 			Expect(VocabSPM.String()).To(Equal("spm"))
 			Expect(RopeNeox.String()).To(Equal("neox"))
 			Expect(PoolingMean.String()).To(Equal("mean"))
@@ -1224,6 +1228,9 @@ how much is 2+2?
 			}
 			// An unrecognised name falls back to auto-detection.
 			Expect(ParseLoadMode("definitely-not-a-load-mode")).To(Equal(LoadModeAuto))
+			// A mode the engine does not define renders numerically rather
+			// than reaching llama_load_mode_name, which aborts on it.
+			Expect(LoadMode(99).String()).To(Equal("LoadMode(99)"))
 		})
 
 		It("builds and parses sharded model paths", func() {
