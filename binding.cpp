@@ -2298,28 +2298,34 @@ int build_split_prefix(char* buf, int buf_size, const char* split_path, int spli
 // Model load modes (mmap, mlock, direct I/O). Names round-trip through
 // load_mode_from_str.
 //
-// The engine throws std::invalid_argument for an unrecognised name. A C++
-// exception crossing into cgo aborts the process, so it is caught here and
-// reported as LLAMA_LOAD_MODE_AUTO, which is the engine's own "decide for me"
-// value.
+// The engine aborts the process on input it does not recognise: an unknown
+// name in llama_load_mode_from_str, an out-of-range value in
+// llama_load_mode_name. An abort cannot be caught, so the engine is only ever
+// handed a valid mode, and names are matched here against its own
+// llama_load_mode_name strings. An unrecognised name is reported as
+// LLAMA_LOAD_MODE_AUTO, which is the engine's own "decide for me" value.
+static bool is_load_mode(int mode) {
+    return mode >= LLAMA_LOAD_MODE_AUTO && mode <= LLAMA_LOAD_MODE_DIRECT_IO;
+}
+
 int load_mode_from_str(const char* str) {
     if (str == nullptr) {
-        return -1;  // LLAMA_LOAD_MODE_AUTO
+        return LLAMA_LOAD_MODE_AUTO;
     }
-    try {
-        return (int) llama_load_mode_from_str(str);
-    } catch (const std::exception & e) {
-        fprintf(stderr, "%s: %s\n", __func__, e.what());
-        return -1;
+    for (int mode = LLAMA_LOAD_MODE_AUTO; is_load_mode(mode); mode++) {
+        if (strcmp(str, llama_load_mode_name((enum llama_load_mode) mode)) == 0) {
+            return mode;
+        }
     }
+    fprintf(stderr, "%s: unknown load mode: %s\n", __func__, str);
+    return LLAMA_LOAD_MODE_AUTO;
 }
 
 int load_mode_name(int mode, char* buf, int buf_size) {
-    const char* name = llama_load_mode_name((enum llama_load_mode) mode);
-    if (name == nullptr) {
+    if (!is_load_mode(mode)) {
         return -1;
     }
-    return snprintf(buf, (size_t) buf_size, "%s", name);
+    return snprintf(buf, (size_t) buf_size, "%s", llama_load_mode_name((enum llama_load_mode) mode));
 }
 
 // The name llama.cpp uses in GGUF for a well-known metadata key.

@@ -1224,6 +1224,9 @@ how much is 2+2?
 			}
 			// An unrecognised name falls back to auto-detection.
 			Expect(ParseLoadMode("definitely-not-a-load-mode")).To(Equal(LoadModeAuto))
+			// A mode the engine does not define renders numerically rather
+			// than reaching llama_load_mode_name, which aborts on it.
+			Expect(LoadMode(99).String()).To(Equal("LoadMode(99)"))
 		})
 
 		It("builds and parses sharded model paths", func() {
