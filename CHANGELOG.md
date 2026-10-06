@@ -78,6 +78,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the length the value needs and the Go side grows to it.
 - `apply_chat_template` was a stub that ignored every argument and returned
   `-1`; see Added above.
+- **Some enum lookups ended the process.** llama.cpp aborts, rather than
+  throws, on a value it does not recognise, and an abort inside a cgo call
+  cannot be recovered from. `ParseLoadMode` with an unknown name (since
+  llama.cpp `6805ae35d` turned its `throw` into an abort), and
+  `LoadMode.String` or `FlashAttnTypeName` with a value outside the enum, all
+  killed the process. They now return `LoadModeAuto`, `"LoadMode(n)"` and `""`
+  respectively.
 
 ## Earlier
 

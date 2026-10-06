@@ -54,28 +54,40 @@ with `SIGABRT` and no Go error is ever returned. Wrap anything that can throw.
 
 Things that throw, and have:
 
-- `llama_load_mode_from_str` throws `std::invalid_argument` for a name it does
-  not recognise.
 - `std::stoi` / `std::stof` throw on malformed input — which is any option
   string that came from a caller.
 - Most llama.cpp file operations throw internally, though the `LLAMA_API`
   entry points for state and quantization catch their own. Check before
   relying on it.
 
-The pattern is to catch, report on stderr, and return the value the Go layer
-already treats as "not available":
+The pattern is to catch, report on stderr, and fall back to the default or to
+the value the Go layer already treats as "not available":
 
 ```cpp
 try {
-    return (int) llama_load_mode_from_str(str);
+    model_params.main_gpu = std::stoi(maingpu);
 } catch (const std::exception & e) {
-    fprintf(stderr, "%s: %s\n", __func__, e.what());
-    return -1;
+    fprintf(stderr, "%s: ignoring malformed main_gpu %s: %s\n", __func__, maingpu, e.what());
 }
 ```
 
-Neither `go vet` nor the compile check catches this — only a test that feeds in
-a bad value does. Write that test.
+### Engine aborts cannot be caught
+
+`GGML_ABORT` and `GGML_ASSERT` end the process from inside llama.cpp, and no
+`try` stops them. The only defence is never to hand the engine a value it
+aborts on:
+
+- The enum-to-name lookups abort on a value outside the enum:
+  `llama_flash_attn_type_name`, `llama_load_mode_name`. Range-check first.
+- `llama_load_mode_from_str` aborts on a name it does not recognise. Match
+  against the engine's own names first, as `load_mode_from_str` does.
+
+Upstream moves functions from throwing to aborting, too. llama.cpp `6805ae35d`
+did that to `llama_load_mode_from_str`, and the `try`/`catch` the binding had
+around it went on compiling while guarding nothing.
+
+Neither `go vet` nor the compile check catches either kind — only a test that
+feeds in a bad value does. Write that test.
 
 ### Mirrored enums
 
@@ -140,6 +152,11 @@ Dependabot PR. To fix one:
    is nearly always right.
 4. If the change forces a breaking Go API change, take it and explain why in
    the commit message. The engine's contract wins.
+
+A bump can also build cleanly and still go red. If the test log ends in
+`SIGABRT` and `signal arrived during cgo execution`, the engine aborted on
+something the binding handed it, and its `file:line: message` is printed just
+above the Go traceback. See [Engine aborts cannot be caught](#engine-aborts-cannot-be-caught).
 
 ## Commit messages
 
