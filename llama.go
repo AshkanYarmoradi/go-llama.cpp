@@ -11,6 +11,7 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"unsafe"
@@ -81,6 +82,7 @@ func newModel(paths []string, mo ModelOptions) (*LLama, error) {
 		C.int(mo.NGPULayers), C.int(mo.NBatch), cstr(mo.MainGPU), cstr(mo.TensorSplit), C.bool(mo.NUMA),
 		C.float(mo.FreqRopeBase), C.float(mo.FreqRopeScale),
 		cstr(mo.LoraAdapter), cstr(mo.LoraBase),
+		C.int(mo.NSeqMax),
 	)
 	if result == nil {
 		return nil, fmt.Errorf("failed loading model %q", paths[0])
@@ -90,16 +92,20 @@ func newModel(paths []string, mo ModelOptions) (*LLama, error) {
 }
 
 // Free releases the model and its context. The LLama must not be used
-// afterwards.
+// afterwards; calling Free again is a no-op, as is calling it on a nil *LLama.
 //
 // It also drops any token and abort callbacks registered for this model. Those
 // are keyed by the context pointer, and the allocator can hand the same address
 // to a later model, so leaving them behind would let a freed model's callbacks
 // fire for an unrelated one.
 func (l *LLama) Free() {
+	if l == nil || l.state == nil {
+		return
+	}
 	l.SetAbortCallback(nil)
-	setCallback(l.state, nil)
+	clearCallbacks(l.state)
 	C.llama_binding_free_model(l.state)
+	l.state = nil
 }
 
 // ApplyLoRA loads a LoRA adapter from path and applies it to the context with
@@ -290,13 +296,15 @@ func (b *Batch) Add(token int32, pos int32, seqIDs []int32, logits bool) error {
 
 // Decode runs the batch through the model using the KV cache. The return value
 // is llama.cpp's decode status: 0 success, 1 = no KV slot (reduce the batch or
-// grow the context), 2 = aborted, negative = error.
+// grow the context), 2 = aborted, negative = error. A batch holding more tokens
+// than ContextParams().NBatch is -1; split it into several decodes.
 func (l *LLama) Decode(b *Batch) int {
 	return int(C.decode_batch(l.state, b.ptr))
 }
 
 // Encode runs the batch through the encoder of an encoder-decoder model. It
-// returns 0 on success, negative on error.
+// returns 0 on success, negative on error. An encoder pass cannot be split, so
+// a batch holding more tokens than ContextParams().NUbatch is -1.
 func (l *LLama) Encode(b *Batch) int {
 	return int(C.encode_batch(l.state, b.ptr))
 }
@@ -328,7 +336,9 @@ func (l *LLama) TokenEmbedding(i int) []float32 {
 }
 
 // SequenceEmbedding returns the pooled embedding for an entire sequence (for a
-// context configured with pooled embeddings). Returns nil if unavailable.
+// context configured with pooled embeddings). For a reranker (PoolingRank) it
+// is the sequence's scores, one per classifier output. Returns nil if
+// unavailable.
 func (l *LLama) SequenceEmbedding(seqID int32) []float32 {
 	return l.embeddingBuf(func(out []float32) int {
 		return int(C.get_embeddings_seq(l.state, C.int(seqID),
@@ -337,7 +347,7 @@ func (l *LLama) SequenceEmbedding(seqID int32) []float32 {
 }
 
 func (l *LLama) embeddingBuf(fn func(out []float32) int) []float32 {
-	n := int(C.get_model_n_embd(l.state))
+	n := l.embeddingCap()
 	if n <= 0 {
 		return nil
 	}
@@ -354,15 +364,25 @@ func (l *LLama) embeddingBuf(fn func(out []float32) int) []float32 {
 // logits back to host memory for the CPU to sample from. After a Decode, read
 // the result with SampledToken rather than Logits plus Sampler.Sample.
 //
-// chain must be a chain from NewSamplerChain, not a bare stage. The caller
-// keeps ownership: the chain must stay alive, and unfreed, for as long as it
-// is attached to the context.
+// chain must be a chain from NewSamplerChain, not a bare stage; a bare stage
+// returns false. The caller keeps ownership: the chain must stay alive, and
+// unfreed, for as long as it is attached to the context.
+//
+// Pass nil, a zero Sampler or a chain with no stages to detach whatever is
+// attached to the sequence; that returns true, including when nothing was
+// attached.
 //
 // This is marked experimental upstream. It reports whether the engine accepted
-// the chain; a context that was not built for backend sampling returns false,
-// and CPU sampling through Sampler.Sample keeps working.
+// the chain; when the engine refuses one it also detaches whatever the
+// sequence had. A context that was not built for backend sampling returns
+// false, and CPU sampling through Sampler.Sample keeps working.
 func (l *LLama) SetSequenceSampler(seqID int32, chain *Sampler) bool {
-	if chain == nil || chain.ptr == nil {
+	// The engine detaches on a chain with no stages too, but reports false.
+	if chain == nil || chain.ptr == nil || (chain.chain && chain.Len() == 0) {
+		return bool(C.set_sequence_sampler(l.state, C.int(seqID), nil))
+	}
+	if !chain.chain {
+		// The engine would read the stage as a chain, which it is not.
 		return false
 	}
 	return bool(C.set_sequence_sampler(l.state, C.int(seqID), chain.ptr))
@@ -448,7 +468,8 @@ func (l *LLama) MemoryClear(clearData bool) {
 
 // MemorySeqRemove removes tokens in [p0, p1) for sequence seqID from the KV
 // cache. Pass p0 < 0 to start at 0 and p1 < 0 to run to the end; seqID < 0
-// matches every sequence. It reports whether the removal succeeded.
+// matches every sequence. It reports whether the removal succeeded, which it
+// does not for a seqID at or above ContextParams().NSeqMax.
 func (l *LLama) MemorySeqRemove(seqID, p0, p1 int32) bool {
 	return bool(C.memory_seq_rm(l.state, C.int(seqID), C.int(p0), C.int(p1)))
 }
@@ -551,7 +572,9 @@ type ContextParams struct {
 	// NUbatch is the physical micro-batch size the graph is built for.
 	NUbatch int
 	// NSeqMax is the number of sequences the KV cache can hold, so valid
-	// sequence ids are [0, NSeqMax).
+	// sequence ids are [0, NSeqMax). The MemorySeq methods and the sequence
+	// state methods treat any other id as a sequence that is not there,
+	// except where they document -1 as every sequence.
 	NSeqMax int
 	// NRSSeq is the number of recurrent-state sequences, for models with a
 	// recurrent (Mamba-style) memory.
@@ -586,10 +609,12 @@ func (l *LLama) SetThreads(nThreads, nThreadsBatch int) {
 }
 
 // SetEmbeddings switches the context between producing logits and producing
-// embeddings. It also updates what Embeddings reports, so a model loaded with
+// embeddings. It also changes what Embeddings and TokenEmbeddings accept: they
+// return an error while embeddings are off. So a model loaded with
 // EnableEmbeddings can be flipped back to generation and vice versa.
 func (l *LLama) SetEmbeddings(enabled bool) {
 	C.context_set_embeddings(l.state, C.bool(enabled))
+	l.embeddings = enabled
 }
 
 // SetCausalAttn selects causal (each token attends only to the past) or
@@ -813,11 +838,37 @@ func (s *Sampler) Free() { C.sampler_free(s.ptr) }
 // Reset clears any internal sampler state (penalty history, grammar position…).
 func (s *Sampler) Reset() { C.sampler_reset(s.ptr) }
 
-// Accept informs stateful stages that token was chosen.
+// Accept informs stateful stages that token was chosen. Sample already does
+// this for the token it returns, so Accept is only for a token chosen some
+// other way, such as one forced into the output or picked by another sampler.
+//
+// A negative token is ignored. When s holds a grammar stage, a token the
+// grammar does not allow next is refused, and so is a token outside the
+// vocabulary, a token with no text, and an end-of-generation token before the
+// grammar is complete: no stage records it, and the reason goes to stderr.
+// Without a grammar stage, a token outside the vocabulary is recorded like
+// any other.
 func (s *Sampler) Accept(token int32) { C.sampler_accept(s.ptr, C.int(token)) }
 
 // Sample selects a token from the logits of the idx-th output of the last
 // Decode/Predict on model (idx = -1 selects the last token).
+//
+// It also accepts the token: every stateful stage (penalties, grammar, ...)
+// has recorded it by the time Sample returns. Do not call Accept with it as
+// well: that records the token a second time, which skews the penalty history
+// and moves a grammar stage on twice, or is refused if the grammar does not
+// allow the token again.
+//
+// Put grammar stages first in the chain, ahead of truncation stages such as
+// top-k and of the stage that picks the token. A grammar stage that comes
+// later can be handed a pick its grammar does not allow. Sample then returns
+// -1, with the reason on stderr, and restarts every grammar stage in the
+// chain from the start of its grammar, because llama.cpp leaves a grammar
+// that refused a token unable to go on. If that pick is an end-of-generation
+// token, llama.cpp aborts the process instead. Sample also returns -1 for an
+// empty Sampler. A chain with no stage that picks a token (greedy, dist,
+// mirostat, ...) and an output that did not request logits abort the process
+// inside llama.cpp as well.
 func (s *Sampler) Sample(model *LLama, idx int) int32 {
 	return int32(C.sampler_sample(model.state, s.ptr, C.int(idx)))
 }
@@ -868,7 +919,18 @@ func (l *LLama) SamplerGrammar(grammar, root string) *Sampler {
 	return &Sampler{ptr: C.sampler_init_grammar(l.state, cG, cR)}
 }
 
-// SamplerDRY builds a DRY ("Don't Repeat Yourself") stage from the model's vocab.
+// SamplerDRY builds a DRY ("Don't Repeat Yourself") stage from the model's
+// vocab. A token that would extend a sequence already repeated within the last
+// penaltyLastN accepted tokens loses multiplier * base^(n - allowedLength) from
+// its logit, where n >= allowedLength is the length of the repeat.
+//
+// A negative penaltyLastN means the context size, ContextParams().NCtx, and a
+// larger window is cut to the context size: the engine allocates the whole
+// window up front, and a context never holds more tokens than that. 0
+// disables the stage, as do multiplier 0 and a base below 1 (Name then
+// reports "?dry"). A stage the engine cannot allocate comes back empty, and
+// Add ignores it. No sequence breakers are set, so unlike llama.cpp's own
+// tools a newline or punctuation does not end a repeat.
 func (l *LLama) SamplerDRY(multiplier, base float32, allowedLength, penaltyLastN int) *Sampler {
 	return &Sampler{ptr: C.sampler_init_dry(l.state, C.float(multiplier), C.float(base),
 		C.int(allowedLength), C.int(penaltyLastN))}
@@ -1169,7 +1231,10 @@ func (l *LLama) VocabType() VocabType {
 // thing for inspecting a vocabulary and the wrong thing for building output:
 // use TokenToPiece for text you intend to concatenate.
 //
-// It returns "" for a token outside the vocabulary.
+// It returns "" for a token outside the vocabulary, and for every token of a
+// model without a vocabulary (VocabType VocabNone, such as an audio codec):
+// llama.cpp asserts on those. TokenScore, TokenAttr, IsControlToken and
+// TokenToPiece treat such a model the same way.
 func (l *LLama) TokenText(token int32) string {
 	buf := make([]byte, 256)
 	ret := int(C.get_vocab_token_text(l.state, C.int(token),
@@ -1190,25 +1255,29 @@ func (l *LLama) TokenText(token int32) string {
 
 // TokenScore returns the vocabulary score for token, used by SPM and UGM
 // tokenizers to choose between competing merges. It is 0 for tokenizers that
-// do not use scores and for a token outside the vocabulary.
+// do not use scores, for a token outside the vocabulary and for a model
+// without a vocabulary.
 func (l *LLama) TokenScore(token int32) float32 {
 	return float32(C.get_vocab_token_score(l.state, C.int(token)))
 }
 
 // TokenAttr returns the attribute bitmask for token, or TokenAttrUndefined for
-// a token outside the vocabulary.
+// a token outside the vocabulary or a model without a vocabulary.
 func (l *LLama) TokenAttr(token int32) TokenAttr {
 	return TokenAttr(C.get_vocab_token_attr(l.state, C.int(token)))
 }
 
 // IsEOG reports whether token ends generation. This covers every end-of-turn
 // and end-of-sequence token the model defines, not only EOS, and is what a
-// generation loop should actually test against.
+// generation loop should actually test against. It is false for a token
+// outside the vocabulary.
 func (l *LLama) IsEOG(token int32) bool {
 	return bool(C.vocab_token_is_eog(l.state, C.int(token)))
 }
 
 // IsControlToken reports whether token is a control token rather than text.
+// It is false for a token outside the vocabulary and for a model without a
+// vocabulary.
 func (l *LLama) IsControlToken(token int32) bool {
 	return bool(C.vocab_token_is_control(l.state, C.int(token)))
 }
@@ -1937,7 +2006,9 @@ func (l *LLama) LoadSessionFile(path string) ([]int32, error) {
 }
 
 // SequenceStateSize returns the number of bytes SequenceStateData will produce
-// for a single sequence.
+// for a single sequence. seqID -1 measures every sequence at once. Any other id
+// outside [0, ContextParams().NSeqMax) is a sequence the context does not
+// hold, and its size is 0.
 func (l *LLama) SequenceStateSize(seqID int32) int64 {
 	return int64(C.state_seq_get_size(l.state, C.int(seqID)))
 }
@@ -1945,6 +2016,9 @@ func (l *LLama) SequenceStateSize(seqID int32) int64 {
 // SequenceStateData serializes just the KV-cache state of one sequence. This
 // is the checkpoint a server wants: it captures a single conversation slot
 // without dragging along every other sequence in the context.
+//
+// seqID -1 captures every sequence. Any other id outside
+// [0, ContextParams().NSeqMax) returns an error.
 func (l *LLama) SequenceStateData(seqID int32) ([]byte, error) {
 	return stateBuf(func(buf []byte) int64 {
 		var p *C.uchar
@@ -1984,12 +2058,24 @@ const (
 	// position, but it cannot reconstruct earlier context.
 	SeqStatePartialOnly SeqStateFlags = 1
 	// SeqStateOnDevice keeps the state in device memory instead of
-	// copying it to host memory.
+	// copying it to host memory. The bytes SequenceStateDataWith returns
+	// then describe only which cells were captured; the data stays in the
+	// context, which keeps one such snapshot per sequence id and replaces it
+	// at the next SeqStateOnDevice capture of that id. So those bytes
+	// restore only into the same LLama, only until that id is captured on
+	// the device again, and only with the same flags (see
+	// SetSequenceStateDataWith).
+	//
+	// On a recurrent or hybrid model whose context holds more than one
+	// sequence (NSeqMax > 1), seqID -1 cannot be captured on the device:
+	// its size is 0 and the capture returns an error.
 	SeqStateOnDevice SeqStateFlags = 2
 )
 
 // SequenceStateSizeWith returns the byte size SequenceStateDataWith will
-// produce for the given flags.
+// produce for the given flags. Sequence ids are treated as in
+// SequenceStateSize: 0 for one the context does not hold. It is also 0 for
+// a capture SeqStateOnDevice rules out.
 func (l *LLama) SequenceStateSizeWith(seqID int32, flags SeqStateFlags) int64 {
 	return int64(C.state_seq_get_size_ext(l.state, C.int(seqID), C.uint(flags)))
 }
@@ -1997,7 +2083,8 @@ func (l *LLama) SequenceStateSizeWith(seqID int32, flags SeqStateFlags) int64 {
 // SequenceStateDataWith serializes a sequence, capturing only the part the
 // flags select. SeqStatePartialOnly on a sliding-window model produces a much
 // smaller checkpoint than SequenceStateData, at the cost of not being able to
-// reconstruct context the model has already slid past.
+// reconstruct context the model has already slid past. A sequence id the
+// context does not hold returns an error, as in SequenceStateData.
 func (l *LLama) SequenceStateDataWith(seqID int32, flags SeqStateFlags) ([]byte, error) {
 	return stateBuf(func(buf []byte) int64 {
 		var p *C.uchar
@@ -2011,6 +2098,12 @@ func (l *LLama) SequenceStateDataWith(seqID int32, flags SeqStateFlags) ([]byte,
 
 // SetSequenceStateDataWith restores state captured by SequenceStateDataWith.
 // The flags must match the ones it was captured with.
+//
+// With SeqStateOnDevice, data must be exactly the bytes of the latest
+// SeqStateOnDevice capture, in this LLama, of the sequence it was captured
+// from, taken with the same flags. Anything else returns an error: llama.cpp
+// would abort the process on it, or restore the context's current snapshot
+// into the wrong cells.
 func (l *LLama) SetSequenceStateDataWith(data []byte, destSeqID int32, flags SeqStateFlags) error {
 	if len(data) == 0 {
 		return errors.New("llama: empty sequence state data")
@@ -2023,7 +2116,9 @@ func (l *LLama) SetSequenceStateDataWith(data []byte, destSeqID int32, flags Seq
 	return nil
 }
 
-// SaveSequenceFile writes one sequence's state and its tokens to path.
+// SaveSequenceFile writes one sequence's state and its tokens to path. seqID
+// -1 writes every sequence. For any other id outside
+// [0, ContextParams().NSeqMax) it writes nothing and returns an error.
 func (l *LLama) SaveSequenceFile(path string, seqID int32, tokens []int32) error {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
@@ -2079,21 +2174,29 @@ func stateBuf(fn func(buf []byte) int64) ([]byte, error) {
 	}
 	return buf[:got], nil
 }
+
+// LoadState restores a context saved with SaveState. It reads the whole file,
+// so it restores into a fresh context as well as into the one that saved it.
+// The context must come from the same model with the same geometry; see
+// SetStateData, which this is the file counterpart of.
+//
+// Predict clears the KV cache before it runs, so it does not continue from the
+// restored state. Drive generation with Decode to build on it.
 func (l *LLama) LoadState(state string) error {
 	d := C.CString(state)
+	defer C.free(unsafe.Pointer(d))
 	w := C.CString("rb")
-	result := C.load_state(l.state, d, w)
+	defer C.free(unsafe.Pointer(w))
 
-	defer C.free(unsafe.Pointer(d)) // free allocated C string
-	defer C.free(unsafe.Pointer(w)) // free allocated C string
-
-	if result != 0 {
-		return fmt.Errorf("error while loading state")
+	if C.load_state(l.state, d, w) != 0 {
+		return fmt.Errorf("llama: failed to load state from %q", state)
 	}
-
 	return nil
 }
 
+// SaveState writes the whole context state to dst, replacing any existing
+// file. The file holds the same bytes StateData returns, and LoadState reads
+// it back.
 func (l *LLama) SaveState(dst string) error {
 	d := C.CString(dst)
 	defer C.free(unsafe.Pointer(d))
@@ -2106,106 +2209,120 @@ func (l *LLama) SaveState(dst string) error {
 	return nil
 }
 
-// Token Embeddings
+// errEmbeddingsDisabled is returned by Embeddings and TokenEmbeddings on a
+// context that is not producing embeddings.
+var errEmbeddingsDisabled = errors.New("llama: embeddings are not enabled; load the model with EnableEmbeddings or call SetEmbeddings(true)")
+
+// TokenEmbeddings returns the embedding of a sequence of token ids, which are
+// decoded as given, without detokenizing or adding special tokens. The result
+// is the same as Embeddings would produce for text that tokenizes to them.
+//
+// opts are accepted for compatibility and ignored.
 func (l *LLama) TokenEmbeddings(tokens []int, opts ...PredictOption) ([]float32, error) {
 	if !l.embeddings {
-		return []float32{}, fmt.Errorf("model loaded without embeddings")
+		return nil, errEmbeddingsDisabled
 	}
-
-	po := NewPredictOptions(opts...)
-
-	outSize := po.Tokens
-	if po.Tokens == 0 {
-		outSize = 9999999
+	ids := make([]int32, len(tokens))
+	for i, t := range tokens {
+		if t < 0 || t > math.MaxInt32 {
+			return nil, fmt.Errorf("llama: token %d at index %d is not a valid token id", t, i)
+		}
+		ids[i] = int32(t)
 	}
-
-	floats := make([]float32, outSize)
-
-	myArray := (*C.int)(C.malloc(C.size_t(len(tokens)) * C.sizeof_int))
-
-	// Copy the values from the Go slice to the C array
-	for i, v := range tokens {
-		(*[1<<31 - 1]int32)(unsafe.Pointer(myArray))[i] = int32(v)
-	}
-
-	params := C.llama_allocate_params(C.CString(""), C.int(po.Seed), C.int(po.Threads), C.int(po.Tokens), C.int(po.TopK),
-		C.float(po.TopP), C.float(po.MinP), C.float(po.Temperature), C.float(po.Penalty), C.int(po.Repeat),
-		C.bool(po.IgnoreEOS), C.bool(po.F16KV),
-		C.int(po.Batch), C.int(po.NKeep), nil, C.int(0),
-		C.float(po.TailFreeSamplingZ), C.float(po.TypicalP), C.float(po.FrequencyPenalty), C.float(po.PresencePenalty),
-		C.int(po.Mirostat), C.float(po.MirostatETA), C.float(po.MirostatTAU), C.bool(po.PenalizeNL), C.CString(po.LogitBias),
-		C.CString(po.PathPromptCache), C.bool(po.PromptCacheAll), C.bool(po.MLock), C.bool(po.MMap),
-		C.CString(po.MainGPU), C.CString(po.TensorSplit),
-		C.bool(po.PromptCacheRO),
-		C.CString(po.Grammar),
-		C.float(po.RopeFreqBase), C.float(po.RopeFreqScale),
-		C.int(po.NDraft),
-		C.float(po.XTCProbability), C.float(po.XTCThreshold),
-		C.float(po.DRYMultiplier), C.float(po.DRYBase), C.int(po.DRYAllowedLength), C.int(po.DRYPenaltyLastN),
-		C.float(po.TopNSigma),
-	)
-	ret := C.get_token_embeddings(params, l.state, myArray, C.int(len(tokens)), (*C.float)(&floats[0]))
-	if ret != 0 {
-		return floats, fmt.Errorf("embedding inference failed")
-	}
-	return floats, nil
+	return l.embed(ids)
 }
 
-// Embeddings
+// Embeddings returns one embedding vector for text. It needs a context that
+// produces embeddings: load the model with EnableEmbeddings, or switch an
+// existing context with SetEmbeddings(true).
+//
+// The vector has the model's embedding width, which is n_embd
+// (ModelInfo.EmbeddingSize) for nearly every model. When the context pools
+// (ContextParams().Pooling is not PoolingNone, as for most dedicated embedding
+// models) it is the pooled embedding of the whole text. A generative model
+// does not pool, and the vector is then the last token's hidden state, the
+// only one that has seen all of the text. A reranker (PoolingRank) returns its
+// scores instead.
+//
+// The text is tokenized with the model's special tokens (such as BOS) and
+// decoded in one batch, so it may hold at most ContextParams().NBatch tokens;
+// longer text returns an error. Each call clears the KV cache first.
+//
+// opts are accepted for compatibility and ignored.
 func (l *LLama) Embeddings(text string, opts ...PredictOption) ([]float32, error) {
 	if !l.embeddings {
-		return []float32{}, fmt.Errorf("model loaded without embeddings")
+		return nil, errEmbeddingsDisabled
 	}
-
-	po := NewPredictOptions(opts...)
-
-	input := C.CString(text)
-	if po.Tokens == 0 {
-		po.Tokens = 99999999
+	tokens := l.Tokenize(text, true, true)
+	if tokens == nil {
+		return nil, fmt.Errorf("llama: failed to tokenize %d bytes of text", len(text))
 	}
-	floats := make([]float32, po.Tokens)
-	reverseCount := len(po.StopPrompts)
-	reversePrompt := make([]*C.char, reverseCount)
-	var pass **C.char
-	for i, s := range po.StopPrompts {
-		cs := C.CString(s)
-		reversePrompt[i] = cs
-		pass = &reversePrompt[0]
-	}
-
-	params := C.llama_allocate_params(input, C.int(po.Seed), C.int(po.Threads), C.int(po.Tokens), C.int(po.TopK),
-		C.float(po.TopP), C.float(po.MinP), C.float(po.Temperature), C.float(po.Penalty), C.int(po.Repeat),
-		C.bool(po.IgnoreEOS), C.bool(po.F16KV),
-		C.int(po.Batch), C.int(po.NKeep), pass, C.int(reverseCount),
-		C.float(po.TailFreeSamplingZ), C.float(po.TypicalP), C.float(po.FrequencyPenalty), C.float(po.PresencePenalty),
-		C.int(po.Mirostat), C.float(po.MirostatETA), C.float(po.MirostatTAU), C.bool(po.PenalizeNL), C.CString(po.LogitBias),
-		C.CString(po.PathPromptCache), C.bool(po.PromptCacheAll), C.bool(po.MLock), C.bool(po.MMap),
-		C.CString(po.MainGPU), C.CString(po.TensorSplit),
-		C.bool(po.PromptCacheRO),
-		C.CString(po.Grammar),
-		C.float(po.RopeFreqBase), C.float(po.RopeFreqScale),
-		C.int(po.NDraft),
-		C.float(po.XTCProbability), C.float(po.XTCThreshold),
-		C.float(po.DRYMultiplier), C.float(po.DRYBase), C.int(po.DRYAllowedLength), C.int(po.DRYPenaltyLastN),
-		C.float(po.TopNSigma),
-	)
-
-	ret := C.get_embeddings(params, l.state, (*C.float)(&floats[0]))
-	if ret != 0 {
-		return floats, fmt.Errorf("embedding inference failed")
-	}
-
-	return floats, nil
+	return l.embed(tokens)
 }
 
+// embed runs tokens through the context as one sequence and returns its
+// embedding.
+func (l *LLama) embed(tokens []int32) ([]float32, error) {
+	if len(tokens) == 0 {
+		return nil, errors.New("llama: nothing to embed")
+	}
+	n := l.embeddingCap()
+	if n <= 0 {
+		return nil, errors.New("llama: the model reports no embedding width")
+	}
+	out := make([]float32, n)
+	ret := int(C.embed_tokens(l.state, (*C.int)(unsafe.Pointer(&tokens[0])), C.int(len(tokens)),
+		(*C.float)(unsafe.Pointer(&out[0])), C.int(len(out))))
+	switch {
+	case ret > 0:
+		return out[:ret], nil
+	case ret == C.EMBED_ERR_TOO_LONG:
+		return nil, fmt.Errorf("llama: input is %d tokens, more than one decode accepts (ContextParams().NBatch is %d)",
+			len(tokens), l.ContextParams().NBatch)
+	case ret == C.EMBED_ERR_BAD_TOKEN:
+		return nil, errors.New("llama: input holds a token id outside the vocabulary")
+	default:
+		return nil, errors.New("embedding inference failed")
+	}
+}
+
+// embeddingCap is the largest row an embeddings accessor can return: the
+// output embedding width, or a reranker's score count if that is larger.
+func (l *LLama) embeddingCap() int {
+	return max(int(C.get_model_n_embd_out(l.state)), int(C.get_model_n_cls_out(l.state)))
+}
+
+// Predict generates a completion for text and returns it.
+//
+// Every call starts from an empty KV cache: Predict clears the whole cache
+// first. It does not continue an earlier Predict or state restored with
+// LoadState, SetStateData or LoadSessionFile, and it discards any sequences
+// built with Decode.
+//
+// Generation stops after the SetTokens limit, at an end-of-generation token
+// (whose text is not part of the result), when a SetStopWords word appears
+// (it is trimmed from the end of the result), or when a token callback returns
+// false. The prompt is decoded in chunks of at most ContextParams().NBatch
+// tokens, whatever SetBatch asks for. The result is truncated to 8 bytes per
+// SetTokens token plus the prompt length and 1 KiB, and never more than 4 MiB;
+// stream longer output with SetTokenCallback.
+//
+// A failure is always reported as "inference failed", with the details
+// written to stderr or to the SetLogHandler handler. Causes include a prompt
+// longer than the context less four tokens, a decode that fails or is stopped
+// by the abort callback, a context too small to shift once it is full, a
+// WithGrammar grammar that does not parse, and an exception inside llama.cpp.
 func (l *LLama) Predict(text string, opts ...PredictOption) (string, error) {
 	po := NewPredictOptions(opts...)
 
+	// A callback passed as an option is for this call only. It takes
+	// precedence over the one set with (*LLama).SetTokenCallback, which is
+	// back in effect once the call returns.
 	if po.TokenCallback != nil {
-		setCallback(l.state, po.TokenCallback)
+		setCallCallback(l.state, po.TokenCallback)
+		defer setCallCallback(l.state, nil)
 	}
 
-	input := C.CString(text)
 	if po.Tokens == 0 {
 		po.Tokens = 99999999
 	}
@@ -2219,34 +2336,12 @@ func (l *LLama) Predict(text string, opts ...PredictOption) (string, error) {
 	}
 	out := make([]byte, outSize)
 
-	reverseCount := len(po.StopPrompts)
-	reversePrompt := make([]*C.char, reverseCount)
-	var pass **C.char
-	for i, s := range po.StopPrompts {
-		cs := C.CString(s)
-		reversePrompt[i] = cs
-		pass = &reversePrompt[0]
-	}
+	params := newPredictParams(text, po)
+	defer C.llama_free_params(params)
 
-	params := C.llama_allocate_params(input, C.int(po.Seed), C.int(po.Threads), C.int(po.Tokens), C.int(po.TopK),
-		C.float(po.TopP), C.float(po.MinP), C.float(po.Temperature), C.float(po.Penalty), C.int(po.Repeat),
-		C.bool(po.IgnoreEOS), C.bool(po.F16KV),
-		C.int(po.Batch), C.int(po.NKeep), pass, C.int(reverseCount),
-		C.float(po.TailFreeSamplingZ), C.float(po.TypicalP), C.float(po.FrequencyPenalty), C.float(po.PresencePenalty),
-		C.int(po.Mirostat), C.float(po.MirostatETA), C.float(po.MirostatTAU), C.bool(po.PenalizeNL), C.CString(po.LogitBias),
-		C.CString(po.PathPromptCache), C.bool(po.PromptCacheAll), C.bool(po.MLock), C.bool(po.MMap),
-		C.CString(po.MainGPU), C.CString(po.TensorSplit),
-		C.bool(po.PromptCacheRO),
-		C.CString(po.Grammar),
-		C.float(po.RopeFreqBase), C.float(po.RopeFreqScale),
-		C.int(po.NDraft),
-		C.float(po.XTCProbability), C.float(po.XTCThreshold),
-		C.float(po.DRYMultiplier), C.float(po.DRYBase), C.int(po.DRYAllowedLength), C.int(po.DRYPenaltyLastN),
-		C.float(po.TopNSigma),
-	)
 	ret := C.llama_predict(params, l.state, (*C.char)(unsafe.Pointer(&out[0])), C.int(len(out)), C.bool(po.DebugMode))
 	if ret != 0 {
-		return "", fmt.Errorf("inference failed")
+		return "", errors.New("inference failed")
 	}
 	res := C.GoString((*C.char)(unsafe.Pointer(&out[0])))
 
@@ -2255,74 +2350,75 @@ func (l *LLama) Predict(text string, opts ...PredictOption) (string, error) {
 	res = strings.TrimPrefix(res, "\n")
 
 	for _, s := range po.StopPrompts {
-		res = strings.TrimRight(res, s)
-	}
-
-	C.llama_free_params(params)
-
-	if po.TokenCallback != nil {
-		setCallback(l.state, nil)
+		res = strings.TrimSuffix(res, s)
 	}
 
 	return res, nil
 }
 
-// tokenize has an interesting return property: negative lengths (potentially) have meaning.
-// Therefore, return the length seperate from the slice and error - all three can be used together
-func (l *LLama) TokenizeString(text string, opts ...PredictOption) (int32, []int32, error) {
-	po := NewPredictOptions(opts...)
-
-	input := C.CString(text)
-	if po.Tokens == 0 {
-		po.Tokens = 4096 // ???
+// newPredictParams copies text and po into the C parameter block llama_predict
+// reads. The C side keeps its own copies of every string, so the C strings made
+// here are freed before it returns. The caller frees the result with
+// llama_free_params.
+func newPredictParams(text string, po PredictOptions) unsafe.Pointer {
+	var cstrs []*C.char
+	cstr := func(s string) *C.char {
+		p := C.CString(s)
+		cstrs = append(cstrs, p)
+		return p
 	}
-	out := make([]C.int, po.Tokens)
+	defer func() {
+		for _, p := range cstrs {
+			C.free(unsafe.Pointer(p))
+		}
+	}()
 
-	var fakeDblPtr **C.char
+	var stops **C.char
+	if len(po.StopPrompts) > 0 {
+		cStops := make([]*C.char, len(po.StopPrompts))
+		for i, s := range po.StopPrompts {
+			cStops[i] = cstr(s)
+		}
+		stops = &cStops[0]
+	}
 
-	// copy pasted and modified minimally. Should I simplify down / do we need an "allocate defaults"
-	params := C.llama_allocate_params(input, C.int(po.Seed), C.int(po.Threads), C.int(po.Tokens), C.int(po.TopK),
+	return C.llama_allocate_params(cstr(text), C.int(po.Seed), C.int(po.Threads), C.int(po.Tokens), C.int(po.TopK),
 		C.float(po.TopP), C.float(po.MinP), C.float(po.Temperature), C.float(po.Penalty), C.int(po.Repeat),
 		C.bool(po.IgnoreEOS), C.bool(po.F16KV),
-		C.int(po.Batch), C.int(po.NKeep), fakeDblPtr, C.int(0),
+		C.int(po.Batch), C.int(po.NKeep), stops, C.int(len(po.StopPrompts)),
 		C.float(po.TailFreeSamplingZ), C.float(po.TypicalP), C.float(po.FrequencyPenalty), C.float(po.PresencePenalty),
-		C.int(po.Mirostat), C.float(po.MirostatETA), C.float(po.MirostatTAU), C.bool(po.PenalizeNL), C.CString(po.LogitBias),
-		C.CString(po.PathPromptCache), C.bool(po.PromptCacheAll), C.bool(po.MLock), C.bool(po.MMap),
-		C.CString(po.MainGPU), C.CString(po.TensorSplit),
+		C.int(po.Mirostat), C.float(po.MirostatETA), C.float(po.MirostatTAU), C.bool(po.PenalizeNL), cstr(po.LogitBias),
+		cstr(po.PathPromptCache), C.bool(po.PromptCacheAll), C.bool(po.MLock), C.bool(po.MMap),
+		cstr(po.MainGPU), cstr(po.TensorSplit),
 		C.bool(po.PromptCacheRO),
-		C.CString(po.Grammar),
+		cstr(po.Grammar),
 		C.float(po.RopeFreqBase), C.float(po.RopeFreqScale),
 		C.int(po.NDraft),
 		C.float(po.XTCProbability), C.float(po.XTCThreshold),
 		C.float(po.DRYMultiplier), C.float(po.DRYBase), C.int(po.DRYAllowedLength), C.int(po.DRYPenaltyLastN),
 		C.float(po.TopNSigma),
 	)
+}
 
-	tokRet := C.llama_tokenize_string(params, l.state, (*C.int)(unsafe.Pointer(&out[0]))) //, C.int(po.Tokens), true)
-
-	if tokRet < 0 {
-		return int32(tokRet), []int32{}, fmt.Errorf("llama_tokenize_string returned negative count %d", tokRet)
+// TokenizeString tokenizes text the way Predict does: with the model's BOS
+// token when its vocabulary asks for one, and with special-token markup such
+// as "</s>" parsed into single tokens. It returns every token, with their count
+// first.
+//
+// opts are accepted for compatibility and ignored. Tokenize is the more direct
+// form of the same call.
+func (l *LLama) TokenizeString(text string, opts ...PredictOption) (int32, []int32, error) {
+	tokens := l.Tokenize(text, l.GetVocabAddBOS(), true)
+	if tokens == nil {
+		return 0, nil, fmt.Errorf("llama: failed to tokenize %d bytes of text", len(text))
 	}
-
-	// TODO: Is this loop still required to unbox cgo to go?
-	gTokRet := int32(tokRet)
-
-	gLenOut := min(len(out), int(gTokRet))
-
-	goSlice := make([]int32, gLenOut)
-	for i := 0; i < gLenOut; i++ {
-		goSlice[i] = int32(out[i])
-	}
-
-	return gTokRet, goSlice, nil
+	return int32(len(tokens)), tokens, nil
 }
 
 // Tokenize converts text into token IDs. addSpecial controls whether the
 // model's configured special tokens (such as BOS) are prepended/appended;
 // parseSpecial controls whether special-token markup in the text is parsed into
-// single tokens rather than treated as literal characters. Unlike
-// TokenizeString it is bounds-safe and does not allocate a sampling params
-// struct.
+// single tokens rather than treated as literal characters.
 func (l *LLama) Tokenize(text string, addSpecial, parseSpecial bool) []int32 {
 	cText := C.CString(text)
 	defer C.free(unsafe.Pointer(cText))
@@ -2349,6 +2445,9 @@ func (l *LLama) Tokenize(text string, addSpecial, parseSpecial bool) []int32 {
 // Detokenize converts a sequence of token IDs back into text. removeSpecial
 // drops leading BOS-style tokens; unparseSpecial renders special tokens as their
 // text form instead of an empty string.
+//
+// It returns "" if any token is outside the vocabulary,
+// [0, GetModelInfo().VocabSize), and for a model without a vocabulary.
 func (l *LLama) Detokenize(tokens []int32, removeSpecial, unparseSpecial bool) string {
 	if len(tokens) == 0 {
 		return ""
@@ -2362,7 +2461,9 @@ func (l *LLama) Detokenize(tokens []int32, removeSpecial, unparseSpecial bool) s
 }
 
 // TokenToPiece returns the text fragment a single token decodes to. When
-// special is true, control and special tokens render to their text form.
+// special is true, control and special tokens render to their text form. It
+// returns "" for a token outside the vocabulary and for a model without a
+// vocabulary.
 func (l *LLama) TokenToPiece(token int32, special bool) string {
 	return growNeg(func(buf []byte) int {
 		return int(C.token_to_piece_str(l.state, C.int(token),
@@ -2391,8 +2492,7 @@ func growNeg(fn func(buf []byte) int, initial int) string {
 
 // CGo only allows us to use static calls from C to Go, we can't just dynamically pass in func's.
 // This is the next best thing, we register the callbacks in this map and call tokenCallback from
-// the C code. We also attach a finalizer to LLama, so it will unregister the callback when the
-// garbage collection frees it.
+// the C code. Free unregisters them.
 
 // SetTokenCallback registers a callback for the individual tokens created when running Predict. It
 // will be called once for each token. The callback shall return true as long as the model should
@@ -2401,7 +2501,11 @@ func growNeg(fn func(buf []byte) int, initial int) string {
 // the tokens may not be valid UTF-8.
 // Pass in nil to remove a callback.
 //
-// It is save to call this method while a prediction is running.
+// The callback stays registered until it is replaced, removed or the model is freed. A callback
+// passed to a single Predict with the SetTokenCallback option takes precedence for that call only.
+//
+// It is safe to call this method while a prediction is running, including from inside the
+// callback.
 func (l *LLama) SetTokenCallback(callback func(token string) bool) {
 	setCallback(l.state, callback)
 }
@@ -2409,14 +2513,25 @@ func (l *LLama) SetTokenCallback(callback func(token string) bool) {
 var (
 	m         sync.RWMutex
 	callbacks = map[uintptr]func(string) bool{}
+	// callCallbacks holds the callback a running Predict was given with the
+	// SetTokenCallback option. It takes precedence over the entry in callbacks
+	// and is removed when that Predict returns, which leaves callbacks as it
+	// was.
+	callCallbacks = map[uintptr]func(string) bool{}
 )
 
 //export tokenCallback
 func tokenCallback(statePtr unsafe.Pointer, token *C.char) bool {
 	m.RLock()
-	defer m.RUnlock()
+	callback, ok := callCallbacks[uintptr(statePtr)]
+	if !ok {
+		callback, ok = callbacks[uintptr(statePtr)]
+	}
+	m.RUnlock()
 
-	if callback, ok := callbacks[uintptr(statePtr)]; ok {
+	// Run the callback without holding the lock, so it can call
+	// SetTokenCallback itself.
+	if ok {
 		return callback(C.GoString(token))
 	}
 
@@ -2426,12 +2541,27 @@ func tokenCallback(statePtr unsafe.Pointer, token *C.char) bool {
 // setCallback can be used to register a token callback for LLama. Pass in a nil callback to
 // remove the callback.
 func setCallback(statePtr unsafe.Pointer, callback func(string) bool) {
+	setCallbackIn(callbacks, statePtr, callback)
+}
+
+// setCallCallback registers, or with nil removes, the per-call callback of a Predict.
+func setCallCallback(statePtr unsafe.Pointer, callback func(string) bool) {
+	setCallbackIn(callCallbacks, statePtr, callback)
+}
+
+// clearCallbacks drops every token callback registered for statePtr.
+func clearCallbacks(statePtr unsafe.Pointer) {
+	setCallback(statePtr, nil)
+	setCallCallback(statePtr, nil)
+}
+
+func setCallbackIn(registry map[uintptr]func(string) bool, statePtr unsafe.Pointer, callback func(string) bool) {
 	m.Lock()
 	defer m.Unlock()
 
 	if callback == nil {
-		delete(callbacks, uintptr(statePtr))
+		delete(registry, uintptr(statePtr))
 	} else {
-		callbacks[uintptr(statePtr)] = callback
+		registry[uintptr(statePtr)] = callback
 	}
 }

@@ -16,6 +16,8 @@ extern void goLogCallback(int level, char* text);
 void set_log_callback(bool enable);
 bool has_log_callback(void);
 
+// Restores a context saved by save_state, reading the whole file. Both return
+// 0 on success and non-zero on failure.
 int load_state(void *ctx, char *statefile, char*modes);
 
 int save_state(void *ctx, char *dst, char*modes);
@@ -35,30 +37,46 @@ void* load_model(const char *fname,
                  bool numa, 
                  float rope_freq_base, 
                  float rope_freq_scale,
-                 const char *lora, const char *lora_base
+                 const char *lora, const char *lora_base,
+                 int n_seq_max
                  );
 
 
 // Loads a model from an explicit list of shards. Only needed when the shard
 // filenames do not follow llama.cpp's own naming scheme; otherwise load_model
-// with the first shard is enough.
+// with the first shard is enough. n_seq_max <= 0 keeps llama.cpp's default of
+// one sequence.
 void* load_model_splits(const char **paths, int n_paths,
                         int n_ctx, int n_seed, bool memory_f16, bool mlock,
                         bool embeddings, bool mmap, bool low_vram, int n_gpu_layers, int n_batch,
                         const char *maingpu, const char *tensorsplit, bool numa, float rope_freq_base,
-                        float rope_freq_scale, const char *lora, const char *lora_base);
+                        float rope_freq_scale, const char *lora, const char *lora_base, int n_seq_max);
 
 // Sequence state with a llama_state_seq_flags mask, which lets a caller
 // capture part of a sequence rather than all of it. Same buffer contract as
-// the plain state_seq_* functions.
+// the plain state_seq_* functions. With LLAMA_STATE_SEQ_FLAGS_ON_DEVICE,
+// state_seq_set_data_ext restores only the exact bytes of the latest on-device
+// capture of their sequence, with the same flags, and fails (0) otherwise.
 long long state_seq_get_size_ext(void* state_ptr, int seq_id, unsigned int flags);
 long long state_seq_get_data_ext(void* state_ptr, unsigned char* buf, long long buf_size,
                                  int seq_id, unsigned int flags);
 long long state_seq_set_data_ext(void* state_ptr, const unsigned char* buf, long long buf_size,
                                  int dest_seq_id, unsigned int flags);
-int get_embeddings(void* params_ptr, void* state_pr, float * res_embeddings);
 
-int get_token_embeddings(void* params_ptr, void* state_pr, int *tokens, int tokenSize, float * res_embeddings);
+// Embeds n_tokens tokens as sequence 0 in one decode, after clearing the KV
+// cache, and copies the result into out: the pooled sequence embedding when the
+// context pools, otherwise the last token's. A row is n_embd_out floats, or
+// n_cls_out for a reranker; never more than out_size are written. Returns the
+// number of floats written, or one of the negative EMBED_ERR_* codes.
+enum {
+    EMBED_ERR_EMPTY       = -1, // no tokens, or no output buffer
+    EMBED_ERR_BAD_TOKEN   = -2, // a token id outside the vocabulary
+    EMBED_ERR_TOO_LONG    = -3, // more tokens than one decode accepts (n_batch)
+    EMBED_ERR_DECODE      = -4, // llama_decode failed
+    EMBED_ERR_UNAVAILABLE = -5, // the context produced no embeddings
+    EMBED_ERR_EXCEPTION   = -6, // the engine threw
+};
+int embed_tokens(void* state_ptr, const int* tokens, int n_tokens, float* out, int out_size);
 
 void* llama_allocate_params(const char *prompt, int seed, int threads, int tokens,
                             int top_k, float top_p, float min_p, float temp, float repeat_penalty, 
@@ -99,13 +117,12 @@ int lora_adapter_meta_val_str_by_index(void* state_ptr, int i, int j, char* buf,
 int lora_adapter_alora_tokens(void* state_ptr, int i, int* tokens_out, int max_tokens);
 int set_control_vector(void* state_ptr, const float* data, int len, int n_embd, int il_start, int il_end);
 
-int llama_tokenize_string(void* params_ptr, void* state_pr, int* result);
-
 // Direct tokenization helpers that do not require a binding_params struct.
 // tokenize_text returns the token count, or the negative of the required count
 // when max_tokens is too small (matching llama_tokenize). detokenize_text and
 // token_to_piece_str return the bytes written, or the negative of the required
-// size when the buffer is too small (matching llama.cpp).
+// size when the buffer is too small (matching llama.cpp). Both return 0 for a
+// token id outside the vocabulary, which llama.cpp would throw on.
 int tokenize_text(void* state_ptr, const char* text, int text_len,
                   int* tokens_out, int max_tokens,
                   bool add_special, bool parse_special);
@@ -114,11 +131,15 @@ int detokenize_text(void* state_ptr, const int* tokens, int n_tokens,
                     bool remove_special, bool unparse_special);
 int token_to_piece_str(void* state_ptr, int token, char* buf, int buf_size, bool special);
 
+// Runs a whole generation with the parameters from llama_allocate_params and
+// copies the text into result, truncated to result_size. Returns 0 on success,
+// non-zero on failure, including an exception inside the engine.
 int llama_predict(void* params_ptr, void* state_pr, char* result, int result_size, bool debug);
 
 // Low-level batching, decoding, and output access. batch_init allocates an
 // opaque batch (free with batch_free); batch_add appends tokens; decode_batch /
-// encode_batch run it through the model; get_logits_ith / get_embeddings_ith /
+// encode_batch run it through the model, returning -1 for a batch larger than
+// the context accepts in one call; get_logits_ith / get_embeddings_ith /
 // get_embeddings_seq copy outputs; the memory_* helpers manage the KV cache.
 void* batch_init(int n_tokens, int n_seq_max);
 void batch_free(void* batch_ptr);
@@ -159,6 +180,10 @@ int get_sampled_candidates(void* state_ptr, int i, int* out, int out_size);
 // the required size when the buffer is too small. The file loaders return the
 // token count, or -1 on failure -- a buffer smaller than the file's token
 // count is a failure, not a truncation, so probe the size first.
+//
+// The state_seq_* functions take a sequence id in [0, n_seq_max), or -1 for
+// every sequence. Any other id is a sequence that is not there: 0 bytes, false
+// or -1, and no file written.
 long long state_get_size(void* state_ptr);
 long long state_get_data(void* state_ptr, unsigned char* buf, long long buf_size);
 long long state_set_data(void* state_ptr, const unsigned char* buf, long long buf_size);
@@ -231,7 +256,8 @@ int get_vocab_fim_sep(void* state_ptr);
 
 
 // Vocabulary introspection. The *_str-style functions follow snprintf
-// semantics (see above) and return -1 for an out-of-range token.
+// semantics (see above) and return -1 for an out-of-range token, as they do for
+// every token of a model without a vocabulary (LLAMA_VOCAB_TYPE_NONE).
 // get_vocab_token_text returns the raw stored vocabulary entry, which is not
 // the same as printable text -- use token_to_piece_str for output.
 // get_vocab_token_attr returns a bitmask of llama_token_attr values.
@@ -322,7 +348,8 @@ void context_synchronize(void* state_ptr);
 
 // Further KV-cache operations. memory_seq_add shifts, and memory_seq_div
 // divides, the positions of a sequence in [p0, p1); negative p0/p1 mean "from
-// the start" / "to the end". The pos accessors return -1 for an empty sequence.
+// the start" / "to the end". The pos accessors return -1 for an empty sequence,
+// and for a seq_id outside [0, n_seq_max), which the others ignore.
 void memory_seq_add(void* state_ptr, int seq_id, int p0, int p1, int delta);
 void memory_seq_div(void* state_ptr, int seq_id, int p0, int p1, int d);
 int memory_seq_pos_min(void* state_ptr, int seq_id);
@@ -345,7 +372,9 @@ long long llama_time_us_val(void);
 // Composable samplers. Build a chain with sampler_chain_init, append stages
 // created by the sampler_init_* helpers with sampler_chain_add (the chain takes
 // ownership), then sampler_sample from a decoded context. sampler_free releases
-// a sampler and, for a chain, every stage added to it.
+// a sampler and, for a chain, every stage added to it. sampler_accept ignores
+// a negative token and one a grammar stage would refuse; sampler_sample returns
+// -1 (LLAMA_TOKEN_NULL) for a null sampler and when a stage throws.
 void* sampler_chain_init(void);
 void sampler_chain_add(void* chain, void* smpl);
 void sampler_free(void* smpl);
@@ -365,6 +394,8 @@ void* sampler_init_top_n_sigma(float n);
 void* sampler_init_mirostat_v2(unsigned int seed, float tau, float eta);
 void* sampler_init_penalties(void* state_ptr, int last_n, float repeat, float freq, float present);
 void* sampler_init_grammar(void* state_ptr, const char* grammar, const char* root);
+// A negative penalty_last_n is the context size (llama_n_ctx), and a larger one
+// is capped at it; 0 disables DRY. Returns NULL if the stage cannot be allocated.
 void* sampler_init_dry(void* state_ptr, float multiplier, float base, int allowed_length, int penalty_last_n);
 
 // Remaining sampler stages. sampler_init_logit_bias takes the (token, bias)
