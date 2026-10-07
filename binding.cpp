@@ -14,6 +14,8 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <map>
+#include <memory>
 #include <sstream>
 #include <iostream>
 #include <string>
@@ -42,6 +44,9 @@ struct llama_binding_state {
     // re-applied (llama_set_adapters_lora replaces the set) and freed on teardown.
     std::vector<llama_adapter_lora *> lora_adapters;
     std::vector<float> lora_scales;
+    // The flags and bytes of the latest on-device sequence capture of each
+    // sequence id, which state_seq_set_data_ext checks a restore against.
+    std::map<int, std::pair<unsigned int, std::vector<uint8_t>>> on_device_seq;
 };
 
 // Wrapper around a llama_batch that also remembers its capacity, so batch_add
@@ -147,64 +152,191 @@ static std::string token_to_piece(const llama_vocab * vocab, llama_token token, 
     return result;
 }
 
-int get_embeddings(void* params_ptr, void* state_pr, float * res_embeddings) {
-    binding_params* params_p = (binding_params*) params_ptr;
-    llama_binding_state* state = (llama_binding_state*) state_pr;
-    llama_context* ctx = state->ctx;
-    llama_model* model = state->model;
-    const llama_vocab * vocab = llama_model_get_vocab(model);
-    
-    // Tokenize the prompt
-    bool add_bos = llama_vocab_get_add_bos(vocab);
-    std::vector<llama_token> tokens = tokenize_prompt(vocab, params_p->prompt, add_bos);
-    
-    if (tokens.empty()) {
-        fprintf(stderr, "%s: error: prompt is empty\n", __func__);
-        return 1;
-    }
-    
-    // Each call embeds its own prompt, so drop the cells left by earlier calls.
-    // Without this the context fills up and llama_decode runs out of slots.
-    llama_memory_seq_rm(llama_get_memory(ctx), -1, -1, -1);
-
-    // Create batch
-    llama_batch batch = llama_batch_get_one(tokens.data(), tokens.size());
-
-    // Decode
-    if (llama_decode(ctx, batch) != 0) {
-        fprintf(stderr, "%s: failed to decode\n", __func__);
-        return 1;
-    }
-
-    const int n_embd = llama_model_n_embd(model);
-    const float * embeddings = llama_get_embeddings(ctx);
-    
-    if (embeddings == nullptr) {
-        fprintf(stderr, "%s: embeddings not available\n", __func__);
-        return 1;
-    }
-    
-    for (int i = 0; i < n_embd; i++) {
-        res_embeddings[i] = embeddings[i];
-    }
-    
-    return 0;
+// Whether token names an entry in vocab. llama.cpp looks token ids up in its
+// tables either unchecked or with .at(), which throws std::out_of_range, and
+// an exception escaping into cgo aborts the process. embed_tokens, the
+// detokenize and token_to_piece wrappers and the per-token vocab accessors
+// check a caller's id with this (or token_has_text) first. The sampler
+// functions cannot, since a sampler does not expose its vocabulary; the
+// grammar stage is the one that throws on such an id, and sampler_accept
+// catches that (see grammar_stages_allow).
+static bool token_in_vocab(const llama_vocab * vocab, int token) {
+    return token >= 0 && token < llama_vocab_n_tokens(vocab);
 }
 
-int get_token_embeddings(void* params_ptr, void* state_pr, int *tokens, int tokenSize, float * res_embeddings) {
-    binding_params* params_p = (binding_params*) params_ptr;
-    llama_binding_state* state = (llama_binding_state*) state_pr;
-    llama_model* model = state->model;
-    const llama_vocab * vocab = llama_model_get_vocab(model);
-    
-    // Convert tokens to prompt string
-    std::string prompt;
-    for (int i = 0; i < tokenSize; i++) {
-        prompt += token_to_piece(vocab, tokens[i]);
+// Whether the vocabulary has text, a score and attributes for token. A model
+// converted without a tokenizer (tokenizer.ggml.model "none", as WavTokenizer
+// and other audio codecs are) still has vocab_size ids, which it takes as
+// decode input, so token_in_vocab passes them; but every llama.cpp accessor
+// for a token's text, score or attributes GGML_ASSERTs on such a vocabulary,
+// and no catch stops that.
+static bool token_has_text(const llama_vocab * vocab, int token) {
+    return llama_vocab_type(vocab) != LLAMA_VOCAB_TYPE_NONE && token_in_vocab(vocab, token);
+}
+
+// The look-back window to hand llama_sampler_init_dry. The binding documents
+// a negative window as "the context size", which is what llama.cpp itself did
+// until a6aa6f545 (the change that also dropped llama_sampler_init_dry's
+// n_ctx_train parameter). Since then the engine clamps a negative window to 0,
+// which turns the stage into a no-op, so the binding resolves it to n_ctx
+// here. 0 still disables DRY.
+//
+// A positive window is capped at n_ctx as well. The engine allocates two
+// buffers of that many entries up front, so an unchecked caller value such as
+// INT32_MAX asks for about 16 GiB: std::bad_alloc where the allocation is
+// refused, and where it is overcommitted, an out-of-memory kill once the
+// buffers are zero-filled, which no catch stops. A context never holds more
+// than n_ctx tokens, so the cap only changes anything for a chain that keeps
+// accepting tokens after the context has been shifted or cleared.
+static int32_t dry_penalty_last_n(int32_t n, uint32_t n_ctx) {
+    const int32_t cap = (int32_t) std::min<uint32_t>(n_ctx, (uint32_t) INT32_MAX);
+    if (n < 0) {
+        return cap;
     }
-    params_p->prompt = prompt;
-    
-    return get_embeddings(params_ptr, state_pr, res_embeddings);
+    return std::min(n, cap);
+}
+
+// Parses a tensor split such as "3,1" or "3/1" into split, one proportion per
+// device. split is resized to n_max, the number of floats the engine reads
+// through llama_model_params::tensor_split, and zero-filled first, so a device
+// the string does not name gets nothing and no value survives from an earlier
+// call. Entries past n_max are ignored. Returns false, with split all zero,
+// when an entry is not a number: std::stof throws on one, and an exception
+// escaping into cgo aborts the process.
+static bool parse_tensor_split(const char * str, size_t n_max, std::vector<float> & split) {
+    split.assign(n_max, 0.0f);
+    if (str == nullptr || str[0] == '\0') {
+        return false;
+    }
+    try {
+        const std::string arg = str;
+        const std::regex sep{R"([,/]+)"};
+        std::sregex_token_iterator it{arg.begin(), arg.end(), sep, -1};
+        const std::vector<std::string> parts{it, {}};
+        if (parts.size() > n_max) {
+            fprintf(stderr, "%s: tensor_split names %zu devices; only the first %zu are used\n",
+                    __func__, parts.size(), n_max);
+        }
+        for (size_t i = 0; i < n_max && i < parts.size(); ++i) {
+            split[i] = std::stof(parts[i]);
+        }
+    } catch (const std::exception & e) {
+        fprintf(stderr, "%s: ignoring malformed tensor_split %s: %s\n", __func__, str, e.what());
+        split.assign(n_max, 0.0f);
+        return false;
+    }
+    return true;
+}
+
+// Owns a llama_batch for the length of a scope, so it is freed on every
+// return path, including an exception.
+struct batch_holder {
+    llama_batch batch;
+    explicit batch_holder(int32_t n_tokens) : batch(llama_batch_init(n_tokens, 0, 1)) {}
+    ~batch_holder() { llama_batch_free(batch); }
+    batch_holder(const batch_holder &) = delete;
+    batch_holder & operator=(const batch_holder &) = delete;
+};
+
+// The most tokens one llama_decode call on ctx may carry. The engine
+// GGML_ASSERTs on a larger batch, which aborts the process, so every path that
+// hands it a batch checks this first. A batch that cannot be split into
+// micro-batches (an encoder pass, or non-causal attention) is bounded by
+// n_ubatch instead; the binding creates contexts with n_ubatch = n_batch, so
+// for those both limits are the same.
+static int32_t max_batch_tokens(llama_context * ctx) {
+    int32_t n = (int32_t) llama_n_batch(ctx);
+    if (llama_get_memory(ctx) == nullptr || !llama_get_causal_attn(ctx)) {
+        n = std::min(n, (int32_t) llama_n_ubatch(ctx));
+    }
+    return n;
+}
+
+// Width of one embedding row as the engine stores it. A reranker (RANK
+// pooling) keeps n_cls_out scores per sequence; every other output is
+// n_embd_out wide, which is n_embd for all but a few models with a separate
+// output width.
+static int embd_row_width(llama_binding_state * state, bool sequence) {
+    if (sequence && llama_pooling_type(state->ctx) == LLAMA_POOLING_TYPE_RANK) {
+        return (int) llama_model_n_cls_out(state->model);
+    }
+    return llama_model_n_embd_out(state->model);
+}
+
+// Copies the n floats at src into out, never more than out_size. Returns the
+// number copied, or 0 when there is nothing to copy.
+static int copy_floats(const float * src, int n, float * out, int out_size) {
+    if (src == nullptr || out == nullptr || n <= 0 || out_size <= 0) {
+        return 0;
+    }
+    n = std::min(n, out_size);
+    std::memcpy(out, src, (size_t) n * sizeof(float));
+    return n;
+}
+
+int embed_tokens(void* state_ptr, const int* tokens, int n_tokens, float* out, int out_size) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    llama_context* ctx = state->ctx;
+
+    if (tokens == nullptr || n_tokens <= 0 || out == nullptr || out_size <= 0) {
+        return EMBED_ERR_EMPTY;
+    }
+    const int n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(state->model));
+    for (int i = 0; i < n_tokens; i++) {
+        if (tokens[i] < 0 || tokens[i] >= n_vocab) {
+            return EMBED_ERR_BAD_TOKEN;
+        }
+    }
+    if (n_tokens > max_batch_tokens(ctx)) {
+        return EMBED_ERR_TOO_LONG;
+    }
+
+    try {
+        // Each call embeds its own input, so drop the cells left by earlier
+        // calls. Without this the context fills up and llama_decode runs out
+        // of slots.
+        llama_memory_seq_rm(llama_get_memory(ctx), -1, -1, -1);
+
+        // Every token is marked as an output: pooling reads all of them, the
+        // last one is the row read below when there is no pooling, and an
+        // embeddings context outputs every token anyway (the engine overrides
+        // unset flags, with a warning).
+        batch_holder b(n_tokens);
+        for (int i = 0; i < n_tokens; i++) {
+            b.batch.token[i]     = tokens[i];
+            b.batch.pos[i]       = i;
+            b.batch.n_seq_id[i]  = 1;
+            b.batch.seq_id[i][0] = 0;
+            b.batch.logits[i]    = 1;
+        }
+        b.batch.n_tokens = n_tokens;
+
+        if (llama_decode(ctx, b.batch) != 0) {
+            fprintf(stderr, "%s: failed to decode\n", __func__);
+            return EMBED_ERR_DECODE;
+        }
+
+        // A pooling context reduces the sequence to one vector. Without
+        // pooling (a generative model) every token has its own row, and the
+        // last token's is the only one that has seen the whole input.
+        const float * src;
+        int width;
+        if (llama_pooling_type(ctx) == LLAMA_POOLING_TYPE_NONE) {
+            src   = llama_get_embeddings_ith(ctx, -1);
+            width = embd_row_width(state, false);
+        } else {
+            src   = llama_get_embeddings_seq(ctx, 0);
+            width = embd_row_width(state, true);
+        }
+        if (src == nullptr) {
+            fprintf(stderr, "%s: embeddings not available\n", __func__);
+            return EMBED_ERR_UNAVAILABLE;
+        }
+        return copy_floats(src, width, out, out_size);
+    } catch (const std::exception & e) {
+        fprintf(stderr, "%s: %s\n", __func__, e.what());
+        return EMBED_ERR_EXCEPTION;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -258,16 +390,43 @@ int batch_add(void* batch_ptr, int token, int pos, const int* seq_ids, int n_seq
 }
 
 // Decode a batch using the KV cache. Returns llama_decode's status: 0 success,
-// 1 = no KV slot, 2 = aborted, negative = error.
+// 1 = no KV slot, 2 = aborted, negative = error. A batch larger than the
+// context accepts in one decode is -1 here rather than an engine abort.
 int decode_batch(void* state_ptr, void* batch_ptr) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
-    return llama_decode(state->ctx, ((binding_batch*) batch_ptr)->batch);
+    const llama_batch & batch = ((binding_batch*) batch_ptr)->batch;
+    const int32_t limit = max_batch_tokens(state->ctx);
+    if (batch.n_tokens > limit) {
+        fprintf(stderr, "%s: batch holds %d tokens, more than the context's n_batch (%d)\n",
+                __func__, batch.n_tokens, limit);
+        return -1;
+    }
+    try {
+        return llama_decode(state->ctx, batch);
+    } catch (const std::exception & e) {
+        fprintf(stderr, "%s: %s\n", __func__, e.what());
+        return -1;
+    }
 }
 
-// Encode a batch (encoder-decoder models). Returns 0 on success, negative on error.
+// Encode a batch (encoder-decoder models). Returns 0 on success, negative on
+// error, including a batch larger than one encoder pass accepts.
 int encode_batch(void* state_ptr, void* batch_ptr) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
-    return llama_encode(state->ctx, ((binding_batch*) batch_ptr)->batch);
+    const llama_batch & batch = ((binding_batch*) batch_ptr)->batch;
+    // An encoder pass cannot be split into micro-batches.
+    const int32_t limit = (int32_t) llama_n_ubatch(state->ctx);
+    if (batch.n_tokens > limit) {
+        fprintf(stderr, "%s: batch holds %d tokens, more than the context's n_ubatch (%d)\n",
+                __func__, batch.n_tokens, limit);
+        return -1;
+    }
+    try {
+        return llama_encode(state->ctx, batch);
+    } catch (const std::exception & e) {
+        fprintf(stderr, "%s: %s\n", __func__, e.what());
+        return -1;
+    }
 }
 
 // Copy up to out_size logits for the i-th output token (-1 = last) into out.
@@ -289,37 +448,39 @@ int get_logits_ith(void* state_ptr, int i, float* out, int out_size) {
 }
 
 // Copy up to out_size embeddings for the i-th output token (-1 = last) into out.
+// The row is n_embd_out wide, which is not always n_embd, so reading n_embd
+// floats could run past it.
 int get_embeddings_ith(void* state_ptr, int i, float* out, int out_size) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
-    const float* emb = llama_get_embeddings_ith(state->ctx, i);
-    if (emb == nullptr) {
-        return 0;
-    }
-    int n = llama_model_n_embd(state->model);
-    if (n > out_size) {
-        n = out_size;
-    }
-    for (int k = 0; k < n; k++) {
-        out[k] = emb[k];
-    }
-    return n;
+    return copy_floats(llama_get_embeddings_ith(state->ctx, i), embd_row_width(state, false), out, out_size);
 }
 
-// Copy up to out_size pooled embeddings for an entire sequence into out.
+// Copy up to out_size pooled embeddings for an entire sequence into out. A
+// reranker's row is its n_cls_out scores rather than an n_embd vector.
 int get_embeddings_seq(void* state_ptr, int seq_id, float* out, int out_size) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
-    const float* emb = llama_get_embeddings_seq(state->ctx, seq_id);
-    if (emb == nullptr) {
-        return 0;
-    }
-    int n = llama_model_n_embd(state->model);
-    if (n > out_size) {
-        n = out_size;
-    }
-    for (int k = 0; k < n; k++) {
-        out[k] = emb[k];
-    }
-    return n;
+    return copy_floats(llama_get_embeddings_seq(state->ctx, seq_id), embd_row_width(state, true), out, out_size);
+}
+
+// Whether seq_id names a sequence the context holds, [0, n_seq_max). A context
+// with more than one sequence keeps a KV-cache stream per sequence, and every
+// cache operation GGML_ASSERTs on an id past them. They also assert on a
+// negative id, except -1 where an operation takes it to mean every sequence.
+// llama_decode rejects such ids itself; the sequence wrappers below check
+// before they reach the cache.
+static bool seq_in_range(llama_context * ctx, int seq_id) {
+    return seq_id >= 0 && (uint32_t) seq_id < llama_n_seq_max(ctx);
+}
+
+// Whether the state_seq_* functions may read seq_id or restore into it: a
+// sequence the context holds, or -1, which the engine takes to mean every
+// sequence. Any other id is a sequence that is not there. The KV cache tests
+// its per-cell sequence bits with std::bitset::test, which throws
+// std::out_of_range for an id at or past LLAMA_MAX_SEQ (or a negative one
+// other than -1); the restores assert on an id past the cache's streams, and
+// so do the reads of a DeepSeek-V4 cache, which keeps a stream per sequence.
+static bool seq_state_id_ok(llama_context * ctx, int seq_id) {
+    return seq_id == -1 || seq_in_range(ctx, seq_id);
 }
 
 // KV-cache / sequence management on the context memory.
@@ -328,35 +489,85 @@ void memory_clear(void* state_ptr, bool data) {
     llama_memory_clear(llama_get_memory(state->ctx), data);
 }
 
+// A negative seq_id removes from every sequence; the engine accepts only -1.
 bool memory_seq_rm(void* state_ptr, int seq_id, int p0, int p1) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
+    if (seq_id < 0) {
+        seq_id = -1;
+    } else if (!seq_in_range(state->ctx, seq_id)) {
+        return false;
+    }
     return llama_memory_seq_rm(llama_get_memory(state->ctx), seq_id, p0, p1);
 }
 
 void memory_seq_cp(void* state_ptr, int src, int dst, int p0, int p1) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
+    if (!seq_in_range(state->ctx, src) || !seq_in_range(state->ctx, dst)) {
+        return;
+    }
     llama_memory_seq_cp(llama_get_memory(state->ctx), src, dst, p0, p1);
 }
 
 void memory_seq_keep(void* state_ptr, int seq_id) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
+    if (!seq_in_range(state->ctx, seq_id)) {
+        return;
+    }
     llama_memory_seq_keep(llama_get_memory(state->ctx), seq_id);
 }
 
-int llama_predict(void* params_ptr, void* state_pr, char* result, int result_size, bool debug) {
-    binding_params* params_p = (binding_params*) params_ptr;
+struct sampler_deleter {
+    void operator()(llama_sampler * smpl) const { llama_sampler_free(smpl); }
+};
+using sampler_ptr = std::unique_ptr<llama_sampler, sampler_deleter>;
+
+// Puts the context's thread counts back when it goes out of scope, so a
+// per-call thread count cannot outlive the call on any return path.
+struct thread_restore {
+    llama_context * ctx;
+    int32_t n_threads;
+    int32_t n_threads_batch;
+    bool active;
+
+    explicit thread_restore(llama_context * c)
+        : ctx(c), n_threads(llama_n_threads(c)), n_threads_batch(llama_n_threads_batch(c)), active(false) {}
+    ~thread_restore() {
+        if (active) {
+            llama_set_n_threads(ctx, n_threads, n_threads_batch);
+        }
+    }
+    thread_restore(const thread_restore &) = delete;
+    thread_restore & operator=(const thread_restore &) = delete;
+};
+
+static int llama_predict_impl(binding_params* params_p, void* state_pr, char* result, int result_size, bool debug) {
     llama_binding_state* state = (llama_binding_state*) state_pr;
     llama_context* ctx = state->ctx;
     llama_model* model = state->model;
     const llama_vocab * vocab = llama_model_get_vocab(model);
     llama_memory_t mem = llama_get_memory(ctx);
 
-    const int n_ctx = llama_n_ctx(ctx);
+    // Predict runs on sequence 0, which in a context holding several
+    // sequences owns only its share of the cells.
+    const int n_ctx = llama_n_ctx_seq(ctx);
+
+    // The prompt goes to the engine in chunks it accepts in one decode: the
+    // caller's batch size, capped at the context's own.
+    const int n_batch_ctx = max_batch_tokens(ctx);
+    const int n_batch = params_p->n_batch > 0 ? std::min(params_p->n_batch, n_batch_ctx) : n_batch_ctx;
+
+    // A thread count given for this call applies to this call only.
+    thread_restore threads(ctx);
+    if (params_p->n_threads > 0) {
+        llama_set_n_threads(ctx, params_p->n_threads, params_p->n_threads);
+        threads.active = true;
+    }
 
     // Each prediction starts from a clean cache: n_past below counts from zero,
     // so cells left over from an earlier call would both desync the position
-    // bookkeeping and fill up the context. Use save_state/load_state to carry
-    // state across calls on purpose.
+    // bookkeeping and fill up the context. This also drops any state restored
+    // with load_state or a session file; to continue from saved state, drive
+    // decoding through the batch API instead.
     llama_memory_seq_rm(mem, -1, -1, -1);
 
     // Note: the RNG seed is applied when the sampler chain is built below
@@ -377,14 +588,28 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, int result_siz
     }
     
     // Initialize sampler chain
-    llama_sampler * smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    sampler_ptr smpl(llama_sampler_chain_init(llama_sampler_chain_default_params()));
 
-    // Apply logit bias first so it influences every downstream sampler,
+    // The grammar goes first. Every later stage, including the one that picks
+    // the token, then only ever sees tokens the grammar allows. Placed after
+    // the picking stage it masked logits too late, and the token it then had
+    // to accept could be one it rejects, which throws.
+    if (!params_p->grammar.empty()) {
+        llama_sampler * grammar_smpl = llama_sampler_init_grammar(vocab, params_p->grammar.c_str(), "root");
+        if (grammar_smpl == nullptr) {
+            // Generating unconstrained text would ignore what was asked for.
+            fprintf(stderr, "%s: error: failed to parse the grammar\n", __func__);
+            return 1;
+        }
+        llama_sampler_chain_add(smpl.get(), grammar_smpl);
+    }
+
+    // Apply logit bias next so it influences every downstream sampler,
     // including greedy selection. params_p->logit_bias is populated only when
     // the caller passes a "token(+|-)value" bias string; previously it was
     // parsed but never wired into the chain, so the bias was silently ignored.
     if (!params_p->logit_bias.empty()) {
-        llama_sampler_chain_add(smpl, llama_sampler_init_logit_bias(
+        llama_sampler_chain_add(smpl.get(), llama_sampler_init_logit_bias(
             llama_vocab_n_tokens(vocab),
             (int32_t) params_p->logit_bias.size(),
             params_p->logit_bias.data()));
@@ -393,23 +618,25 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, int result_siz
     // Add samplers based on parameters
     if (params_p->temp <= 0) {
         // Greedy sampling
-        llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
+        llama_sampler_chain_add(smpl.get(), llama_sampler_init_greedy());
     } else {
-        // Add DRY sampler if enabled (before other samplers)
+        // Add DRY sampler if enabled (before other samplers). Its default
+        // window, -1, is the context size, which the engine no longer
+        // resolves itself.
         if (params_p->dry_multiplier > 0.0f) {
-            llama_sampler_chain_add(smpl, llama_sampler_init_dry(
+            llama_sampler_chain_add(smpl.get(), llama_sampler_init_dry(
                 vocab,
                 params_p->dry_multiplier,
                 params_p->dry_base,
                 params_p->dry_allowed_length,
-                params_p->dry_penalty_last_n,
+                dry_penalty_last_n(params_p->dry_penalty_last_n, llama_n_ctx(ctx)),
                 nullptr, 0  // no custom sequence breakers
             ));
         }
         
         // Add penalty sampler if needed
         if (params_p->repeat_penalty != 1.0f || params_p->frequency_penalty != 0.0f || params_p->presence_penalty != 0.0f) {
-            llama_sampler_chain_add(smpl, llama_sampler_init_penalties(
+            llama_sampler_chain_add(smpl.get(), llama_sampler_init_penalties(
                 llama_vocab_n_tokens(vocab),
                 params_p->repeat_last_n,
                 params_p->repeat_penalty,
@@ -419,8 +646,8 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, int result_siz
         }
         
         if (params_p->mirostat == 1) {
-            llama_sampler_chain_add(smpl, llama_sampler_init_temp(params_p->temp));
-            llama_sampler_chain_add(smpl, llama_sampler_init_mirostat(
+            llama_sampler_chain_add(smpl.get(), llama_sampler_init_temp(params_p->temp));
+            llama_sampler_chain_add(smpl.get(), llama_sampler_init_mirostat(
                 llama_vocab_n_tokens(vocab),
                 params_p->seed,
                 params_p->mirostat_tau,
@@ -428,8 +655,8 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, int result_siz
                 100 // m
             ));
         } else if (params_p->mirostat == 2) {
-            llama_sampler_chain_add(smpl, llama_sampler_init_temp(params_p->temp));
-            llama_sampler_chain_add(smpl, llama_sampler_init_mirostat_v2(
+            llama_sampler_chain_add(smpl.get(), llama_sampler_init_temp(params_p->temp));
+            llama_sampler_chain_add(smpl.get(), llama_sampler_init_mirostat_v2(
                 params_p->seed,
                 params_p->mirostat_tau,
                 params_p->mirostat_eta
@@ -439,24 +666,24 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, int result_siz
             
             // Top-N Sigma sampling (if enabled)
             if (params_p->top_n_sigma > 0.0f) {
-                llama_sampler_chain_add(smpl, llama_sampler_init_top_n_sigma(params_p->top_n_sigma));
+                llama_sampler_chain_add(smpl.get(), llama_sampler_init_top_n_sigma(params_p->top_n_sigma));
             }
             
-            llama_sampler_chain_add(smpl, llama_sampler_init_top_k(params_p->top_k));
+            llama_sampler_chain_add(smpl.get(), llama_sampler_init_top_k(params_p->top_k));
             if (params_p->tfs_z < 1.0f) {
                 // Note: TFS is removed in new API, skip
             }
             if (params_p->typical_p < 1.0f) {
-                llama_sampler_chain_add(smpl, llama_sampler_init_typical(params_p->typical_p, 1));
+                llama_sampler_chain_add(smpl.get(), llama_sampler_init_typical(params_p->typical_p, 1));
             }
-            llama_sampler_chain_add(smpl, llama_sampler_init_top_p(params_p->top_p, 1));
+            llama_sampler_chain_add(smpl.get(), llama_sampler_init_top_p(params_p->top_p, 1));
             if (params_p->min_p > 0.0f) {
-                llama_sampler_chain_add(smpl, llama_sampler_init_min_p(params_p->min_p, 1));
+                llama_sampler_chain_add(smpl.get(), llama_sampler_init_min_p(params_p->min_p, 1));
             }
             
             // XTC sampling (if enabled)
             if (params_p->xtc_probability > 0.0f) {
-                llama_sampler_chain_add(smpl, llama_sampler_init_xtc(
+                llama_sampler_chain_add(smpl.get(), llama_sampler_init_xtc(
                     params_p->xtc_probability,
                     params_p->xtc_threshold,
                     1,  // min_keep
@@ -464,16 +691,8 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, int result_siz
                 ));
             }
             
-            llama_sampler_chain_add(smpl, llama_sampler_init_temp(params_p->temp));
-            llama_sampler_chain_add(smpl, llama_sampler_init_dist(params_p->seed));
-        }
-    }
-    
-    // Add grammar sampler if specified
-    if (!params_p->grammar.empty()) {
-        llama_sampler * grammar_smpl = llama_sampler_init_grammar(vocab, params_p->grammar.c_str(), "root");
-        if (grammar_smpl != nullptr) {
-            llama_sampler_chain_add(smpl, grammar_smpl);
+            llama_sampler_chain_add(smpl.get(), llama_sampler_init_temp(params_p->temp));
+            llama_sampler_chain_add(smpl.get(), llama_sampler_init_dist(params_p->seed));
         }
     }
     
@@ -497,12 +716,21 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, int result_siz
             // Context is full: discard the oldest half of the tokens after
             // n_keep and move the rest down, so the cache has free cells again.
             if (n_past + (int) embd.size() > n_ctx) {
+                // Not every cache can move positions: M-RoPE models (Qwen2-VL,
+                // Qwen3-VL, Qwen3.5) assert inside llama_memory_seq_add. A
+                // full context ends the generation there instead, as
+                // llama.cpp's own CLI does.
+                if (!llama_memory_can_shift(mem)) {
+                    fprintf(stderr, "%s: context is full (n_ctx = %d) and this model's cache cannot shift; stopping\n",
+                            __func__, n_ctx);
+                    break;
+                }
+
                 const int n_discard = (n_past - n_keep) / 2;
 
                 if (n_discard <= 0 || n_keep + (int) embd.size() > n_ctx) {
                     fprintf(stderr, "%s: error: context too small to shift (n_ctx = %d, n_keep = %d)\n",
                             __func__, n_ctx, n_keep);
-                    llama_sampler_free(smpl);
                     return 1;
                 }
 
@@ -513,17 +741,16 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, int result_siz
             }
 
             // Create batch and decode
-            for (int i = 0; i < (int) embd.size(); i += params_p->n_batch) {
+            for (int i = 0; i < (int) embd.size(); i += n_batch) {
                 int n_eval = (int) embd.size() - i;
-                if (n_eval > params_p->n_batch) {
-                    n_eval = params_p->n_batch;
+                if (n_eval > n_batch) {
+                    n_eval = n_batch;
                 }
                 
                 llama_batch batch = llama_batch_get_one(&embd[i], n_eval);
                 
                 if (llama_decode(ctx, batch) != 0) {
                     fprintf(stderr, "%s: failed to decode\n", __func__);
-                    llama_sampler_free(smpl);
                     return 1;
                 }
                 n_past += n_eval;
@@ -533,10 +760,18 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, int result_siz
         embd.clear();
         
         if ((int) embd_inp.size() <= n_consumed) {
-            // Sample next token
-            llama_token id = llama_sampler_sample(smpl, ctx, -1);
-            llama_sampler_accept(smpl, id);
-            
+            // Sample the next token. llama_sampler_sample also accepts it into
+            // every stateful stage, so it must not be accepted a second time:
+            // that counted each token twice in the penalty history and threw
+            // from a grammar stage.
+            llama_token id = llama_sampler_sample(smpl.get(), ctx, -1);
+
+            // End of generation is a stop signal, not output: its text (such
+            // as "</s>") goes neither to the callback nor into the result.
+            if (llama_vocab_is_eog(vocab, id)) {
+                break;
+            }
+
             // Add to output
             embd.push_back(id);
             --n_remain;
@@ -554,7 +789,7 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, int result_siz
             while ((int) embd_inp.size() > n_consumed) {
                 embd.push_back(embd_inp[n_consumed]);
                 ++n_consumed;
-                if ((int) embd.size() >= params_p->n_batch) {
+                if ((int) embd.size() >= n_batch) {
                     break;
                 }
             }
@@ -585,8 +820,6 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, int result_siz
     if (debug) {
         llama_perf_context_print(ctx);
     }
-    
-    llama_sampler_free(smpl);
 
     // Bounded copy: a token decodes to several bytes, so `res` is routinely
     // longer than the caller's token limit. Truncate instead of overrunning.
@@ -594,6 +827,22 @@ int llama_predict(void* params_ptr, void* state_pr, char* result, int result_siz
         snprintf(result, (size_t) result_size, "%s", res.c_str());
     }
     return 0;
+}
+
+// Returns 0 on success, non-zero on failure; the cause goes to stderr or the
+// engine's log.
+int llama_predict(void* params_ptr, void* state_pr, char* result, int result_size, bool debug) {
+    // An exception escaping into cgo aborts the process. Generation can throw,
+    // from an allocation or a sampler stage, so report it as an ordinary
+    // failure. Every resource is scope-owned, so nothing leaks on the way out.
+    try {
+        return llama_predict_impl((binding_params*) params_ptr, state_pr, result, result_size, debug);
+    } catch (const std::exception & e) {
+        fprintf(stderr, "%s: %s\n", __func__, e.what());
+    } catch (...) {
+        fprintf(stderr, "%s: unknown exception\n", __func__);
+    }
+    return 1;
 }
 
 void llama_binding_free_model(void *state_ptr) {
@@ -648,22 +897,6 @@ void llama_free_params(void* params_ptr) {
     delete params;
 }
 
-int llama_tokenize_string(void* params_ptr, void* state_pr, int* result) {
-    binding_params* params_p = (binding_params*) params_ptr;
-    llama_binding_state* state = (llama_binding_state*) state_pr;
-    llama_model* model = state->model;
-    const llama_vocab * vocab = llama_model_get_vocab(model);
-    
-    bool add_bos = llama_vocab_get_add_bos(vocab);
-    std::vector<llama_token> tokens = tokenize_prompt(vocab, params_p->prompt, add_bos);
-    
-    for (size_t i = 0; i < tokens.size(); i++) {
-        result[i] = tokens[i];
-    }
-
-    return (int)tokens.size();
-}
-
 int tokenize_text(void* state_ptr, const char* text, int text_len,
                   int* tokens_out, int max_tokens,
                   bool add_special, bool parse_special) {
@@ -673,18 +906,34 @@ int tokenize_text(void* state_ptr, const char* text, int text_len,
                           max_tokens, add_special, parse_special);
 }
 
+// Input holding a token outside the vocabulary detokenizes to nothing (0), as
+// does a negative count; llama.cpp throws std::out_of_range on such a token.
 int detokenize_text(void* state_ptr, const int* tokens, int n_tokens,
                     char* buf, int buf_size,
                     bool remove_special, bool unparse_special) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
     const llama_vocab * vocab = llama_model_get_vocab(state->model);
+    if (n_tokens < 0 || (n_tokens > 0 && tokens == nullptr)) {
+        return 0;
+    }
+    for (int i = 0; i < n_tokens; i++) {
+        if (!token_in_vocab(vocab, tokens[i])) {
+            return 0;
+        }
+    }
     return llama_detokenize(vocab, (const llama_token*) tokens, n_tokens, buf,
                             buf_size, remove_special, unparse_special);
 }
 
+// A token outside the vocabulary renders to nothing (0); llama.cpp throws
+// std::out_of_range on one. So does every token of a model without a
+// vocabulary, on which llama.cpp asserts.
 int token_to_piece_str(void* state_ptr, int token, char* buf, int buf_size, bool special) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
     const llama_vocab * vocab = llama_model_get_vocab(state->model);
+    if (!token_has_text(vocab, token)) {
+        return 0;
+    }
     return llama_token_to_piece(vocab, token, buf, buf_size, 0, special);
 }
 
@@ -700,39 +949,49 @@ void delete_vector(std::vector<std::string>* vec) {
     delete vec;
 }
 
+// Restores a context written by save_state. Returns 0 on success, non-zero
+// when the file cannot be read or does not restore.
+//
+// The whole file is read. How much state there is depends on how full the
+// saving context's cache was, so sizing the read from this context's own
+// llama_state_get_size, as this used to, cut the data short on any context
+// holding less, including a fresh one.
 int load_state(void *ctx, char *statefile, char*modes) {
     llama_binding_state* state = (llama_binding_state*) ctx;
     llama_context* lctx = state->ctx;
-    
-    const size_t state_size = llama_state_get_size(lctx);
-    uint8_t * state_mem = new uint8_t[state_size];
-    
+
     FILE *fp_read = fopen(statefile, modes);
     if (fp_read == nullptr) {
         fprintf(stderr, "%s: failed to open state file for reading\n", __func__);
-        delete[] state_mem;
         return 1;
     }
-    
-    const size_t ret = fread(state_mem, 1, state_size, fp_read);
-    if (ret != state_size) {
-        fprintf(stderr, "%s: failed to read state\n", __func__);
-        fclose(fp_read);
-        delete[] state_mem;
-        return 1;
+
+    // Read in chunks rather than sizing the file with ftell, which is a long
+    // and so stops at 2 GiB on Windows. std::vector frees on every path, and
+    // a malformed file makes llama_state_set_data throw, which must not cross
+    // cgo.
+    int rc = 1;
+    try {
+        std::vector<uint8_t> state_mem;
+        std::vector<uint8_t> chunk(1 << 20);
+        size_t n;
+        while ((n = fread(chunk.data(), 1, chunk.size(), fp_read)) > 0) {
+            state_mem.insert(state_mem.end(), chunk.begin(), chunk.begin() + n);
+        }
+        if (ferror(fp_read) || state_mem.empty()) {
+            fprintf(stderr, "%s: failed to read state\n", __func__);
+        } else if (llama_state_set_data(lctx, state_mem.data(), state_mem.size()) == 0) {
+            fprintf(stderr, "%s: failed to set state data\n", __func__);
+        } else {
+            rc = 0;
+        }
+    } catch (const std::exception & e) {
+        fprintf(stderr, "%s: failed to restore state: %s\n", __func__, e.what());
+        rc = 1;
     }
-    
-    size_t read_size = llama_state_set_data(lctx, state_mem, state_size);
-    if (read_size == 0) {
-        fprintf(stderr, "%s: failed to set state data\n", __func__);
-        fclose(fp_read);
-        delete[] state_mem;
-        return 1;
-    }
-    
+
     fclose(fp_read);
-    delete[] state_mem;
-    return 0;
+    return rc;
 }
 
 // Returns 0 on success, non-zero on failure: the file could not be opened, the
@@ -864,7 +1123,7 @@ static void* load_model_impl(const char **paths, int n_paths,
                  int n_ctx, int n_seed, bool memory_f16, bool mlock,
                  bool embeddings, bool mmap, bool low_vram, int n_gpu_layers, int n_batch,
                  const char *maingpu, const char *tensorsplit, bool numa, float rope_freq_base,
-                 float rope_freq_scale, const char *lora, const char *lora_base) {
+                 float rope_freq_scale, const char *lora, const char *lora_base, int n_seq_max) {
 
     if (paths == nullptr || n_paths <= 0 || paths[0] == nullptr) {
         fprintf(stderr, "%s: error: no model path given\n", __func__);
@@ -894,9 +1153,11 @@ static void* load_model_impl(const char **paths, int n_paths,
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = n_gpu_layers;
     // llama.cpp replaced the use_mmap/use_mlock booleans with a single
-    // load_mode enum. Preserve the binding's semantics: mlock implies mmap
-    // (LLAMA_LOAD_MODE_MLOCK == "mmap + keep resident"), a plain mmap request
-    // maps to LLAMA_LOAD_MODE_MMAP, and neither maps to LLAMA_LOAD_MODE_NONE.
+    // load_mode enum. An mlock request selects LLAMA_LOAD_MODE_MLOCK, which
+    // reads the model into memory and locks it there without mmap, whatever
+    // mmap says (mmap plus mlock would be LLAMA_LOAD_MODE_MMAP_MLOCK). A plain
+    // mmap request maps to LLAMA_LOAD_MODE_MMAP, and neither to
+    // LLAMA_LOAD_MODE_NONE.
     model_params.load_mode = mlock ? LLAMA_LOAD_MODE_MLOCK
                            : mmap  ? LLAMA_LOAD_MODE_MMAP
                                    : LLAMA_LOAD_MODE_NONE;
@@ -912,23 +1173,17 @@ static void* load_model_impl(const char **paths, int n_paths,
         }
     }
 
-    static float tensor_split_values[128] = {0};
-    if (tensorsplit != nullptr && tensorsplit[0] != '\0') {
-        std::string arg_next = tensorsplit;
-        const std::regex regex{R"([,/]+)"};
-        std::sregex_token_iterator it{arg_next.begin(), arg_next.end(), regex, -1};
-        std::vector<std::string> split_arg{it, {}};
-
-        try {
-            for (size_t i = 0; i < 128 && i < split_arg.size(); ++i) {
-                tensor_split_values[i] = std::stof(split_arg[i]);
-            }
-            model_params.tensor_split = tensor_split_values;
-        } catch (const std::exception & e) {
-            fprintf(stderr, "%s: ignoring malformed tensor_split %s: %s\n", __func__, tensorsplit, e.what());
-        }
+    // llama_model_params only borrows the split; the model copies it when it
+    // is created. So the buffer lives in this frame, which outlasts the load
+    // calls below. It used to be a function-level static that was never
+    // cleared: a load with a shorter split kept an earlier load's trailing
+    // values, and concurrent loads wrote the same array.
+    std::vector<float> tensor_split;
+    if (tensorsplit != nullptr && tensorsplit[0] != '\0' &&
+        parse_tensor_split(tensorsplit, llama_max_devices(), tensor_split)) {
+        model_params.tensor_split = tensor_split.data();
     }
-    
+
     // Load model
     llama_model * model = n_paths == 1
         ? llama_model_load_from_file(fname, model_params)
@@ -945,12 +1200,35 @@ static void* load_model_impl(const char **paths, int n_paths,
     ctx_params.n_ubatch = n_batch;
     ctx_params.embeddings = embeddings;
 
+    // The number of sequences the context can hold. Sequence ids at or above
+    // it are rejected by llama_decode, so the low-level multi-sequence API
+    // needs more than llama.cpp's default of 1. 0 keeps that default; a value
+    // above the engine's limit fails context creation, and so New.
+    if (n_seq_max > 0) {
+        // The engine also reserves one output row per sequence while it builds
+        // the context, and GGML_ASSERTs that they fit in n_batch, which for a
+        // causal model it first caps at the unpadded n_ctx. That abort cannot
+        // be caught, so refuse more sequences than the batch holds here. A
+        // non-causal model's n_batch is not capped, so this is conservative
+        // for it.
+        const uint32_t n_ctx_eff   = ctx_params.n_ctx > 0 ? ctx_params.n_ctx : (uint32_t) llama_model_n_ctx_train(model);
+        const uint32_t n_batch_eff = std::min(n_ctx_eff, ctx_params.n_batch);
+        if ((uint32_t) n_seq_max > n_batch_eff) {
+            fprintf(stderr, "%s: error: n_seq_max (%d) exceeds the context's batch size (%u)\n",
+                    __func__, n_seq_max, n_batch_eff);
+            llama_model_free(model);
+            return nullptr;
+        }
+        ctx_params.n_seq_max = (uint32_t) n_seq_max;
+    }
+
     // llama_context_default_params sets no_perf = true, which makes the engine
     // skip its own timing calls and leaves llama_perf_context reporting zeros.
     // The binding exposes those counters through Perf(), so enable them; the
     // cost is a couple of clock reads per decode.
     ctx_params.no_perf = false;
     
+    // 0 leaves the engine's own default, which is the model's trained value.
     if (rope_freq_base != 0.0f) {
         ctx_params.rope_freq_base = rope_freq_base;
     }
@@ -988,11 +1266,11 @@ static void* load_model_impl(const char **paths, int n_paths,
 void* load_model(const char *fname, int n_ctx, int n_seed, bool memory_f16, bool mlock,
                  bool embeddings, bool mmap, bool low_vram, int n_gpu_layers, int n_batch,
                  const char *maingpu, const char *tensorsplit, bool numa, float rope_freq_base,
-                 float rope_freq_scale, const char *lora, const char *lora_base) {
+                 float rope_freq_scale, const char *lora, const char *lora_base, int n_seq_max) {
     const char *paths[1] = { fname };
     return load_model_impl(paths, 1, n_ctx, n_seed, memory_f16, mlock, embeddings, mmap,
                            low_vram, n_gpu_layers, n_batch, maingpu, tensorsplit, numa,
-                           rope_freq_base, rope_freq_scale, lora, lora_base);
+                           rope_freq_base, rope_freq_scale, lora, lora_base, n_seq_max);
 }
 
 // Loads a model from an explicit list of shards. Only needed when the shard
@@ -1002,10 +1280,10 @@ void* load_model_splits(const char **paths, int n_paths,
                         int n_ctx, int n_seed, bool memory_f16, bool mlock,
                         bool embeddings, bool mmap, bool low_vram, int n_gpu_layers, int n_batch,
                         const char *maingpu, const char *tensorsplit, bool numa, float rope_freq_base,
-                        float rope_freq_scale, const char *lora, const char *lora_base) {
+                        float rope_freq_scale, const char *lora, const char *lora_base, int n_seq_max) {
     return load_model_impl(paths, n_paths, n_ctx, n_seed, memory_f16, mlock, embeddings, mmap,
                            low_vram, n_gpu_layers, n_batch, maingpu, tensorsplit, numa,
-                           rope_freq_base, rope_freq_scale, lora, lora_base);
+                           rope_freq_base, rope_freq_scale, lora, lora_base, n_seq_max);
 }
 
 // Model info functions
@@ -1242,13 +1520,113 @@ void sampler_reset(void* smpl) {
     llama_sampler_reset((llama_sampler*) smpl);
 }
 
-void sampler_accept(void* smpl, int token) {
-    llama_sampler_accept((llama_sampler*) smpl, token);
+// A grammar stage is the one sampler stage that throws on the token it is
+// asked to accept. It looks the token's text up with .at(), which throws
+// std::out_of_range for an id outside the vocabulary. For a token its grammar
+// does not allow next it throws std::runtime_error, but only after dropping
+// its parse state, and llama.cpp then GGML_ASSERTs the next time the stage is
+// applied. For an end-of-generation token while the grammar is incomplete it
+// GGML_ABORTs outright. The helpers below let the binding ask a grammar stage
+// first, and put one back on its feet after it has thrown.
+
+static bool sampler_is(const llama_sampler * smpl, const char * name) {
+    const char * n = llama_sampler_name(smpl);
+    return n != nullptr && std::strcmp(n, name) == 0;
 }
 
+// Whether every grammar stage in smpl (smpl itself, or any stage of a chain,
+// nested chains included) would let token through next. This applies the
+// stage to token alone, which reads its grammar without changing it. That
+// rejects every token the stage's accept fails on, an end-of-generation token
+// included, and also a token whose text is empty, which accept would let
+// through without advancing the grammar. A lazy grammar still waiting for its
+// trigger lets everything through, as its accept does. Throws
+// std::out_of_range for a token outside the vocabulary.
+static bool grammar_stages_allow(llama_sampler * smpl, llama_token token) {
+    if (sampler_is(smpl, "chain")) {
+        const int32_t n = llama_sampler_chain_n(smpl);
+        for (int32_t i = 0; i < n; i++) {
+            if (!grammar_stages_allow(llama_sampler_chain_get(smpl, i), token)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (!sampler_is(smpl, "grammar")) {
+        return true;
+    }
+    llama_token_data candidate = { token, 0.0f, 0.0f };
+    llama_token_data_array cur_p = { &candidate, 1, -1, false };
+    llama_sampler_apply(smpl, &cur_p);
+    return cur_p.size == 1 && cur_p.data[0].logit != -INFINITY;
+}
+
+// Restarts every grammar stage in smpl from the start of its grammar: after a
+// throw, that is the only state from which llama.cpp can apply it again.
+static void reset_grammar_stages(llama_sampler * smpl) {
+    if (sampler_is(smpl, "chain")) {
+        const int32_t n = llama_sampler_chain_n(smpl);
+        for (int32_t i = 0; i < n; i++) {
+            reset_grammar_stages(llama_sampler_chain_get(smpl, i));
+        }
+    } else if (sampler_is(smpl, "grammar")) {
+        try {
+            llama_sampler_reset(smpl);
+        } catch (const std::exception & e) {
+            fprintf(stderr, "%s: %s\n", __func__, e.what());
+        }
+    }
+}
+
+// Records token in every stateful stage of smpl, unless a grammar stage would
+// refuse it: then no stage records it, and the refusal goes to stderr. A
+// sampler does not expose its vocabulary, so an id outside it reaches the
+// stages of a chain without a grammar stage, which only record it. A negative
+// id is never a token and is ignored: an adaptive-p stage that has not sampled
+// yet GGML_ASSERTs on -1 (LLAMA_TOKEN_NULL).
+void sampler_accept(void* smpl, int token) {
+    if (smpl == nullptr || token < 0) {
+        return;
+    }
+    llama_sampler * s = (llama_sampler *) smpl;
+    try {
+        if (!grammar_stages_allow(s, token)) {
+            fprintf(stderr, "%s: token %d not accepted: a grammar stage does not allow it next\n",
+                    __func__, token);
+            return;
+        }
+    } catch (const std::exception & e) {
+        fprintf(stderr, "%s: token %d not accepted: %s\n", __func__, token, e.what());
+        return;
+    }
+    try {
+        llama_sampler_accept(s, token);
+    } catch (const std::exception & e) {
+        fprintf(stderr, "%s: token %d not accepted: %s\n", __func__, token, e.what());
+        reset_grammar_stages(s);
+    }
+}
+
+// Samples, and accepts, the next token for the idx-th output. Returns
+// LLAMA_TOKEN_NULL (-1) for a null sampler and when a stage throws. That
+// happens when a grammar stage does not allow the token picked: because the
+// grammar comes after the stage that picks, or after a truncation stage that
+// left it only tokens it rejects, or because a backend sampler picked. The
+// grammar stages are then restarted (see reset_grammar_stages). Still fatal
+// inside llama.cpp: such a pick that is an end-of-generation token, a chain
+// with no stage that picks, and an output that did not request logits.
 int sampler_sample(void* state_ptr, void* smpl, int idx) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
-    return llama_sampler_sample((llama_sampler*) smpl, state->ctx, idx);
+    if (smpl == nullptr) {
+        return LLAMA_TOKEN_NULL;
+    }
+    try {
+        return llama_sampler_sample((llama_sampler*) smpl, state->ctx, idx);
+    } catch (const std::exception & e) {
+        fprintf(stderr, "%s: %s\n", __func__, e.what());
+        reset_grammar_stages((llama_sampler*) smpl);
+        return LLAMA_TOKEN_NULL;
+    }
 }
 
 void* sampler_init_greedy(void)                    { return llama_sampler_init_greedy(); }
@@ -1274,11 +1652,20 @@ void* sampler_init_grammar(void* state_ptr, const char* grammar, const char* roo
     return llama_sampler_init_grammar(vocab, grammar, root);
 }
 
+// A negative penalty_last_n is the context size, and a larger one is capped at
+// it (see dry_penalty_last_n); 0 disables the stage. Returns nullptr, which
+// Sampler.Add ignores, if the engine cannot allocate the stage.
 void* sampler_init_dry(void* state_ptr, float multiplier, float base, int allowed_length, int penalty_last_n) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
     const llama_vocab* vocab = llama_model_get_vocab(state->model);
-    return llama_sampler_init_dry(vocab, multiplier, base, allowed_length, penalty_last_n,
-                                  nullptr, 0);
+    try {
+        return llama_sampler_init_dry(vocab, multiplier, base, allowed_length,
+                                      dry_penalty_last_n(penalty_last_n, llama_n_ctx(state->ctx)),
+                                      nullptr, 0);
+    } catch (const std::exception & e) {
+        fprintf(stderr, "%s: %s\n", __func__, e.what());
+        return nullptr;
+    }
 }
 
 //
@@ -1354,26 +1741,42 @@ void context_synchronize(void* state_ptr) {
 }
 
 //
-// KV-cache (memory) operations not already exposed
+// KV-cache (memory) operations not already exposed. A sequence the context
+// does not hold is a no-op, or -1 (empty) for the position queries.
 //
 
 void memory_seq_add(void* state_ptr, int seq_id, int p0, int p1, int delta) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
+    // A cache that cannot shift either asserts in seq_add (M-RoPE models) or
+    // aborts at the next decode's K-shift (Step-3.5).
+    if (!seq_in_range(state->ctx, seq_id) || !llama_memory_can_shift(llama_get_memory(state->ctx))) {
+        return;
+    }
     llama_memory_seq_add(llama_get_memory(state->ctx), seq_id, p0, p1, delta);
 }
 
 void memory_seq_div(void* state_ptr, int seq_id, int p0, int p1, int d) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
+    // As in memory_seq_add: seq_div asserts on a cache that cannot shift.
+    if (!seq_in_range(state->ctx, seq_id) || !llama_memory_can_shift(llama_get_memory(state->ctx))) {
+        return;
+    }
     llama_memory_seq_div(llama_get_memory(state->ctx), seq_id, p0, p1, d);
 }
 
 int memory_seq_pos_min(void* state_ptr, int seq_id) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
+    if (!seq_in_range(state->ctx, seq_id)) {
+        return -1;
+    }
     return llama_memory_seq_pos_min(llama_get_memory(state->ctx), seq_id);
 }
 
 int memory_seq_pos_max(void* state_ptr, int seq_id) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
+    if (!seq_in_range(state->ctx, seq_id)) {
+        return -1;
+    }
     return llama_memory_seq_pos_max(llama_get_memory(state->ctx), seq_id);
 }
 
@@ -1508,10 +1911,14 @@ int get_vocab_type(void* state_ptr) {
 // Returns the raw vocabulary entry for a token: the stored piece, before any
 // byte-fallback or SentencePiece space decoding. Use token_to_piece_str for
 // text that can be concatenated into output.
+//
+// This and the score, attribute and control lookups below report nothing for
+// a token without text (token_has_text): one outside the vocabulary, or any
+// token of a model without a vocabulary.
 int get_vocab_token_text(void* state_ptr, int token, char* buf, int buf_size) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
     const llama_vocab* vocab = llama_model_get_vocab(state->model);
-    if (token < 0 || token >= llama_vocab_n_tokens(vocab)) {
+    if (!token_has_text(vocab, token)) {
         return -1;
     }
     const char* text = llama_vocab_get_text(vocab, token);
@@ -1524,7 +1931,7 @@ int get_vocab_token_text(void* state_ptr, int token, char* buf, int buf_size) {
 float get_vocab_token_score(void* state_ptr, int token) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
     const llama_vocab* vocab = llama_model_get_vocab(state->model);
-    if (token < 0 || token >= llama_vocab_n_tokens(vocab)) {
+    if (!token_has_text(vocab, token)) {
         return 0.0f;
     }
     return llama_vocab_get_score(vocab, token);
@@ -1533,7 +1940,7 @@ float get_vocab_token_score(void* state_ptr, int token) {
 int get_vocab_token_attr(void* state_ptr, int token) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
     const llama_vocab* vocab = llama_model_get_vocab(state->model);
-    if (token < 0 || token >= llama_vocab_n_tokens(vocab)) {
+    if (!token_has_text(vocab, token)) {
         return 0;  // LLAMA_TOKEN_ATTR_UNDEFINED
     }
     return (int) llama_vocab_get_attr(vocab, token);
@@ -1542,7 +1949,7 @@ int get_vocab_token_attr(void* state_ptr, int token) {
 bool vocab_token_is_eog(void* state_ptr, int token) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
     const llama_vocab* vocab = llama_model_get_vocab(state->model);
-    if (token < 0 || token >= llama_vocab_n_tokens(vocab)) {
+    if (!token_in_vocab(vocab, token)) {
         return false;
     }
     return llama_vocab_is_eog(vocab, token);
@@ -1551,7 +1958,7 @@ bool vocab_token_is_eog(void* state_ptr, int token) {
 bool vocab_token_is_control(void* state_ptr, int token) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
     const llama_vocab* vocab = llama_model_get_vocab(state->model);
-    if (token < 0 || token >= llama_vocab_n_tokens(vocab)) {
+    if (!token_has_text(vocab, token)) {
         return false;
     }
     return llama_vocab_is_control(vocab, token);
@@ -1782,26 +2189,59 @@ int state_load_file(void* state_ptr, const char* path, int* tokens_out, int max_
     return (int) n_out;
 }
 
+// Every per-sequence function below treats a sequence id that seq_state_id_ok
+// rejects as a sequence that is not there: no bytes, no file, a failed
+// restore. Left to itself, the engine reads an id from n_seq_max up to
+// LLAMA_MAX_SEQ - 1 as an empty sequence, except that a DeepSeek-V4 cache
+// holding more than one sequence GGML_ASSERTs on it (it looks the id up in its
+// per-sequence streams). For an id past that, the reads throw
+// std::out_of_range, which llama.cpp's read entry points catch themselves.
+// The restores GGML_ASSERT on an id past the cache's stream map: past
+// n_seq_max when the cache keeps a stream per sequence, and past
+// LLAMA_MAX_SEQ - 1 otherwise.
+
+// The bytes state_seq_get_data needs for seq_id, or 0 for a sequence the
+// context does not hold.
 long long state_seq_get_size(void* state_ptr, int seq_id) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
-    return (long long) llama_state_seq_get_size(state->ctx, seq_id);
+    if (!seq_state_id_ok(state->ctx, seq_id)) {
+        return 0;
+    }
+    try {
+        return (long long) llama_state_seq_get_size(state->ctx, seq_id);
+    } catch (const std::exception &) {
+        return 0;
+    }
 }
 
-// As state_get_data, but for a single sequence.
+// As state_get_data, but for a single sequence. Returns 0 for a sequence the
+// context does not hold.
 long long state_seq_get_data(void* state_ptr, unsigned char* buf, long long buf_size, int seq_id) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
-    const size_t need = llama_state_seq_get_size(state->ctx, seq_id);
-    if (buf_size < 0 || (size_t) buf_size < need) {
-        return -(long long) need;
+    if (!seq_state_id_ok(state->ctx, seq_id)) {
+        return 0;
     }
-    return (long long) llama_state_seq_get_data(state->ctx, buf, (size_t) buf_size, seq_id);
+    try {
+        const size_t need = llama_state_seq_get_size(state->ctx, seq_id);
+        if (buf_size < 0 || (size_t) buf_size < need) {
+            return -(long long) need;
+        }
+        return (long long) llama_state_seq_get_data(state->ctx, buf, (size_t) buf_size, seq_id);
+    } catch (const std::exception &) {
+        return 0;
+    }
 }
 
 // Restores a sequence into dest_seq_id, which need not be the id it was saved
-// from. Returns the number of bytes consumed, or 0 on failure.
+// from. Returns the number of bytes consumed, or 0 on failure. The engine
+// asserts on a destination the cache does not hold; -1, which restores every
+// sequence in the data, it accepts.
 long long state_seq_set_data(void* state_ptr, const unsigned char* buf, long long buf_size, int dest_seq_id) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
     if (buf == nullptr || buf_size <= 0) {
+        return 0;
+    }
+    if (!seq_state_id_ok(state->ctx, dest_seq_id)) {
         return 0;
     }
     // A malformed sequence buffer makes llama.cpp throw; translate to 0 = failure.
@@ -1812,9 +2252,10 @@ long long state_seq_set_data(void* state_ptr, const unsigned char* buf, long lon
     }
 }
 
+// Writes nothing, and returns false, for a sequence the context does not hold.
 bool state_seq_save_file(void* state_ptr, const char* path, int seq_id, const int* tokens, int n_tokens) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
-    if (n_tokens < 0) {
+    if (n_tokens < 0 || !seq_state_id_ok(state->ctx, seq_id)) {
         return false;
     }
     try {
@@ -1847,11 +2288,15 @@ int state_seq_file_token_count(void* state_ptr, const char* path) {
 // saved from. Returns the number of tokens read, or -1 on failure — including
 // when max_tokens is smaller than the file's token count, which the engine
 // treats as an error rather than a truncation. Size the buffer with
-// state_seq_file_token_count first.
+// state_seq_file_token_count first. dest_seq_id is checked as in
+// state_seq_set_data.
 int state_seq_load_file(void* state_ptr, const char* path, int dest_seq_id,
                         int* tokens_out, int max_tokens) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
     if (tokens_out == nullptr || max_tokens < 0) {
+        return -1;
+    }
+    if (!seq_state_id_ok(state->ctx, dest_seq_id)) {
         return -1;
     }
     size_t n_out = 0;
@@ -2382,20 +2827,91 @@ static_assert(LLAMA_LOAD_MODE_DIRECT_IO  ==  4, "LoadModeDirectIO out of sync wi
 // sliding-window part of an SWA cache, which is far smaller than the whole
 // sequence and is all that is needed to resume from the current position.
 //
+// LLAMA_STATE_SEQ_FLAGS_ON_DEVICE leaves the tensor data in the context: the
+// bytes a capture returns describe only which cells it took, and the data
+// goes to a snapshot the context keeps per captured sequence id, which the
+// next on-device capture of that id replaces. A restore with the flag reads
+// the snapshot named by the sequence id in the bytes' header, and llama.cpp
+// GGML_ASSERTs when there is none (bytes captured on the host, or by another
+// context) and GGML_ABORTs when the cells the bytes describe do not add up to
+// the snapshot's size (bytes from an earlier capture of the same id, or taken
+// with other flags); where the sizes happen to agree, it restores the newer
+// data into the older layout. Neither abort can be caught, so the binding
+// records the latest on-device capture of each id (on_device_seq) and refuses
+// to restore anything but those exact bytes with those flags.
+//
 
+// Whether the engine can capture seq_id with flags. A recurrent or hybrid
+// model's state GGML_ABORTs when an on-device capture spans more than one run
+// of cells. One sequence always occupies a single cell, but -1, every
+// sequence, can span several runs once the context holds more than one.
+static bool seq_state_flags_ok(llama_binding_state * state, int seq_id, unsigned int flags) {
+    if (seq_id != -1 || (flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) == 0 || llama_n_seq_max(state->ctx) <= 1) {
+        return true;
+    }
+    return !llama_model_is_recurrent(state->model) && !llama_model_is_hybrid(state->model);
+}
+
+// Whether buf is, byte for byte, the latest on-device capture of the sequence
+// id in its header, and flags are the ones it was taken with. The header is
+// the state magic (uint32) followed by the captured sequence id (int32).
+static bool on_device_capture_current(const llama_binding_state * state, const unsigned char * buf,
+                                      size_t size, unsigned int flags) {
+    if (size < sizeof(uint32_t) + sizeof(int32_t)) {
+        return false;
+    }
+    int32_t seq_id;
+    std::memcpy(&seq_id, buf + sizeof(uint32_t), sizeof(seq_id));
+    const auto it = state->on_device_seq.find(seq_id);
+    if (it == state->on_device_seq.end()) {
+        return false;
+    }
+    const unsigned int captured_flags = it->second.first;
+    const std::vector<uint8_t> & captured = it->second.second;
+    return captured_flags == flags && captured.size() == size &&
+           std::memcmp(captured.data(), buf, size) == 0;
+}
+
+// Sequence ids are checked as for the plain state_seq_* functions. The size of
+// a capture seq_state_flags_ok rules out is 0.
 long long state_seq_get_size_ext(void* state_ptr, int seq_id, unsigned int flags) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
-    return (long long) llama_state_seq_get_size_ext(state->ctx, seq_id, flags);
+    if (!seq_state_id_ok(state->ctx, seq_id) || !seq_state_flags_ok(state, seq_id, flags)) {
+        return 0;
+    }
+    try {
+        return (long long) llama_state_seq_get_size_ext(state->ctx, seq_id, flags);
+    } catch (const std::exception &) {
+        return 0;
+    }
 }
 
 long long state_seq_get_data_ext(void* state_ptr, unsigned char* buf, long long buf_size,
                                  int seq_id, unsigned int flags) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
-    const size_t need = llama_state_seq_get_size_ext(state->ctx, seq_id, flags);
-    if (buf_size < 0 || (size_t) buf_size < need) {
-        return -(long long) need;
+    if (!seq_state_id_ok(state->ctx, seq_id) || !seq_state_flags_ok(state, seq_id, flags)) {
+        return 0;
     }
-    return (long long) llama_state_seq_get_data_ext(state->ctx, buf, (size_t) buf_size, seq_id, flags);
+    const bool on_device = (flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) != 0;
+    try {
+        const size_t need = llama_state_seq_get_size_ext(state->ctx, seq_id, flags);
+        if (buf_size < 0 || (size_t) buf_size < need) {
+            return -(long long) need;
+        }
+        if (on_device) {
+            // The capture rewrites the snapshot for seq_id, and can do so even
+            // when it then fails, so the bytes recorded for the previous one
+            // no longer describe it.
+            state->on_device_seq.erase(seq_id);
+        }
+        const size_t n = llama_state_seq_get_data_ext(state->ctx, buf, (size_t) buf_size, seq_id, flags);
+        if (on_device && n > 0) {
+            state->on_device_seq[seq_id] = { flags, std::vector<uint8_t>(buf, buf + n) };
+        }
+        return (long long) n;
+    } catch (const std::exception &) {
+        return 0;
+    }
 }
 
 long long state_seq_set_data_ext(void* state_ptr, const unsigned char* buf, long long buf_size,
@@ -2404,11 +2920,19 @@ long long state_seq_set_data_ext(void* state_ptr, const unsigned char* buf, long
     if (buf == nullptr || buf_size <= 0) {
         return 0;
     }
+    if (!seq_state_id_ok(state->ctx, dest_seq_id)) {
+        return 0;
+    }
+    if ((flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) &&
+        !on_device_capture_current(state, buf, (size_t) buf_size, flags)) {
+        fprintf(stderr, "%s: not the latest on-device capture of its sequence in this context, "
+                        "with the flags it was taken with\n", __func__);
+        return 0;
+    }
     // With SeqStateOnDevice, llama.cpp validates the header before its own
     // try block and throws on a bad magic; without this guard that exception
     // crosses cgo and aborts. Translate it into 0 = failure, matching the
-    // flags=0 path. (A seq-id mismatch trips a GGML_ASSERT upstream, which
-    // abort()s and cannot be caught here.)
+    // flags=0 path.
     try {
         return (long long) llama_state_seq_set_data_ext(state->ctx, buf, (size_t) buf_size, dest_seq_id, flags);
     } catch (const std::exception &) {

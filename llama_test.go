@@ -1,11 +1,14 @@
 package llama_test
 
 import (
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/AshkanYarmoradi/go-llama.cpp"
 	. "github.com/AshkanYarmoradi/go-llama.cpp"
@@ -317,10 +320,10 @@ how much is 2+2?
 			chain.Add(SamplerTemp(0.8))
 			chain.Add(SamplerDist(1234))
 
+			// Sample also accepts the token, so there is no Accept here.
 			tok := chain.Sample(model, -1)
 			Expect(tok).To(BeNumerically(">=", 0))
 			Expect(tok).To(BeNumerically("<", int32(model.GetModelInfo().VocabSize)))
-			chain.Accept(tok)
 		})
 	})
 
@@ -745,13 +748,11 @@ how much is 2+2?
 			if testModelPath == "" {
 				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
 			}
-			model, err := New(testModelPath, EnableF16Memory, SetContext(256), SetMMap(true), SetNBatch(512))
+			model, err := New(testModelPath, EnableF16Memory, SetContext(256), SetMMap(true), SetNBatch(512), SetNSeqMax(2))
 			Expect(err).ToNot(HaveOccurred())
 			defer model.Free()
 
-			if model.ContextParams().NSeqMax < 2 {
-				Skip("context holds a single sequence")
-			}
+			Expect(model.ContextParams().NSeqMax).To(Equal(2))
 
 			a := decodeInto(model, "The capital of France is", 0)
 			decodeInto(model, "The largest ocean is", 1)
@@ -778,13 +779,11 @@ how much is 2+2?
 			if testModelPath == "" {
 				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
 			}
-			model, err := New(testModelPath, EnableF16Memory, SetContext(256), SetMMap(true), SetNBatch(512))
+			model, err := New(testModelPath, EnableF16Memory, SetContext(256), SetMMap(true), SetNBatch(512), SetNSeqMax(2))
 			Expect(err).ToNot(HaveOccurred())
 			defer model.Free()
 
-			if model.ContextParams().NSeqMax < 2 {
-				Skip("context holds a single sequence")
-			}
+			Expect(model.ContextParams().NSeqMax).To(Equal(2))
 
 			tokens := decodeInto(model, "The capital of France is", 0)
 
@@ -987,15 +986,27 @@ how much is 2+2?
 			return model
 		}
 
-		It("rejects a nil or empty chain", func() {
+		It("rejects a bare stage and detaches with a nil or empty chain", func() {
 			if testModelPath == "" {
 				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
 			}
 			model := newModel()
 			defer model.Free()
 
-			Expect(model.SetSequenceSampler(0, nil)).To(BeFalse())
-			Expect(model.SetSequenceSampler(0, &Sampler{})).To(BeFalse())
+			// The engine would read a single stage as if it were a chain.
+			stage := SamplerTopK(40)
+			defer stage.Free()
+			Expect(model.SetSequenceSampler(0, stage)).To(BeFalse())
+
+			// Nothing is attached, so detaching succeeds trivially.
+			Expect(model.SetSequenceSampler(0, nil)).To(BeTrue())
+			Expect(model.SetSequenceSampler(0, &Sampler{})).To(BeTrue())
+
+			// The engine also detaches on a chain with no stages, but on its
+			// own reports false for it.
+			empty := NewSamplerChain()
+			defer empty.Free()
+			Expect(model.SetSequenceSampler(0, empty)).To(BeTrue())
 		})
 
 		It("reports no sampled output when no sampler is attached", func() {
@@ -1482,6 +1493,721 @@ how much is 2+2?
 
 			bad := filepath.Join(GinkgoT().TempDir(), "nonexistent-dir", "state.bin")
 			Expect(model.SaveState(bad)).ToNot(Succeed())
+		})
+	})
+	// Each spec pins one fix from an audit of the binding. Several of these
+	// used to overrun the Go heap, abort the process from inside llama.cpp or
+	// throw a C++ exception across cgo, so for those the binary surviving the
+	// spec is part of what it checks.
+	Context("Binding defect fixes (regression)", func() {
+		const prompt = "The capital of France is"
+
+		load := func(opts ...ModelOption) *LLama {
+			model, err := New(testModelPath, append([]ModelOption{SetContext(128), SetMMap(true)}, opts...)...)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(model).ToNot(BeNil())
+			return model
+		}
+
+		// decode pushes text through model on seqID in one batch, requesting
+		// output for the last token, and returns the tokens and the status.
+		decode := func(model *LLama, text string, seqID int32) ([]int32, int) {
+			tokens := model.Tokenize(text, true, false)
+			Expect(tokens).ToNot(BeEmpty())
+			batch := NewBatch(len(tokens), 1)
+			defer batch.Free()
+			for i, tok := range tokens {
+				Expect(batch.Add(tok, int32(i), []int32{seqID}, i == len(tokens)-1)).To(Succeed())
+			}
+			return tokens, model.Decode(batch)
+		}
+
+		cosine := func(a, b []float32) float64 {
+			var dot, na, nb float64
+			for i := range a {
+				dot += float64(a[i]) * float64(b[i])
+				na += float64(a[i]) * float64(a[i])
+				nb += float64(b[i]) * float64(b[i])
+			}
+			return dot / (math.Sqrt(na) * math.Sqrt(nb))
+		}
+
+		It("leaves RoPE and thread counts to the model and context by default", func() {
+			Expect(DefaultModelOptions.FreqRopeBase).To(BeZero())
+			Expect(DefaultModelOptions.FreqRopeScale).To(BeZero())
+			Expect(DefaultOptions.Threads).To(BeZero())
+			Expect(NewModelOptions().NSeqMax).To(BeZero())
+		})
+
+		It("runs the model with its trained RoPE base unless overridden", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			byDefault := load()
+			defer byDefault.Free()
+
+			arch, ok := byDefault.ModelMetadataValue("general.architecture")
+			Expect(ok).To(BeTrue())
+			raw, ok := byDefault.ModelMetadataValue(arch + ".rope.freq_base")
+			if !ok {
+				Skip("the model does not record its RoPE base")
+			}
+			trained, err := strconv.ParseFloat(raw, 32)
+			Expect(err).ToNot(HaveOccurred())
+			if trained == 10000 {
+				Skip("the model was trained with the old default base, so the two cannot be told apart")
+			}
+
+			// The old default of 10000 replaced the trained base (1e6 for the
+			// CodeLlama CI model), so these predicted differently.
+			explicit := load(WithRopeFreqBase(float32(trained)))
+			defer explicit.Free()
+
+			text := "The capital of France is Paris. The capital of Germany is"
+			_, status := decode(byDefault, text, 0)
+			Expect(status).To(Equal(0))
+			got := append([]float32(nil), byDefault.Logits(-1)...)
+			_, status = decode(explicit, text, 0)
+			Expect(status).To(Equal(0))
+			want := explicit.Logits(-1)
+
+			Expect(got).To(HaveLen(len(want)))
+			maxDiff := 0.0
+			for i := range want {
+				maxDiff = math.Max(maxDiff, math.Abs(float64(got[i]-want[i])))
+			}
+			Expect(maxDiff).To(BeNumerically("<", 1e-2))
+		})
+
+		It("returns one n_embd vector per text from Embeddings", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load(EnableEmbeddings)
+			defer model.Free()
+			nEmbd := model.GetModelInfo().EmbeddingSize
+
+			// The buffer used to be sized from SetTokens (128 by default)
+			// while the engine wrote n_embd floats into it.
+			a, err := model.Embeddings("The quick brown fox")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(a).To(HaveLen(nEmbd))
+			finite := true
+			for _, v := range a {
+				finite = finite && !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0)
+			}
+			Expect(finite).To(BeTrue())
+
+			// It also returned the first token's row, which for a causal model
+			// is the BOS state and so the same for every input.
+			b, err := model.Embeddings("An entirely different sentence", SetTokens(0))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(b).To(HaveLen(nEmbd))
+			Expect(b).ToNot(Equal(a))
+		})
+
+		It("embeds token ids directly with TokenEmbeddings", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load(EnableEmbeddings)
+			defer model.Free()
+
+			const text = "The quick brown fox"
+			fromText, err := model.Embeddings(text)
+			Expect(err).ToNot(HaveOccurred())
+
+			ids := model.Tokenize(text, true, true)
+			tokens := make([]int, len(ids))
+			for i, id := range ids {
+				tokens[i] = int(id)
+			}
+			// The ids used to be detokenized and tokenized again, BOS and all.
+			fromTokens, err := model.TokenEmbeddings(tokens)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(fromTokens).To(HaveLen(len(fromText)))
+			Expect(cosine(fromTokens, fromText)).To(BeNumerically(">", 0.9999))
+
+			for _, bad := range [][]int{nil, {-1}, {model.GetModelInfo().VocabSize}} {
+				_, err = model.TokenEmbeddings(bad)
+				Expect(err).To(HaveOccurred(), "tokens %v", bad)
+			}
+		})
+
+		It("rejects input longer than NBatch instead of aborting", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load(EnableEmbeddings)
+			defer model.Free()
+
+			nBatch := model.ContextParams().NBatch
+			long := strings.Repeat("hello ", nBatch+16)
+			Expect(len(model.Tokenize(long, true, true))).To(BeNumerically(">", nBatch))
+			_, err := model.Embeddings(long)
+			Expect(err).To(HaveOccurred())
+
+			// The context is still usable afterwards.
+			v, err := model.Embeddings("hello")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(v).To(HaveLen(model.GetModelInfo().EmbeddingSize))
+		})
+
+		It("lets SetEmbeddings change what Embeddings accepts", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load()
+			defer model.Free()
+
+			_, err := model.Embeddings("hello")
+			Expect(err).To(HaveOccurred())
+
+			model.SetEmbeddings(true)
+			v, err := model.Embeddings("hello")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(v).To(HaveLen(model.GetModelInfo().EmbeddingSize))
+
+			model.SetEmbeddings(false)
+			_, err = model.Embeddings("hello")
+			Expect(err).To(HaveOccurred())
+
+			// Generation works again once embeddings are off.
+			_, err = model.Predict(prompt, SetTokens(2), SetTemperature(0))
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("constrains Predict to a WithGrammar grammar", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load()
+			defer model.Free()
+
+			// The grammar used to run after the token was already picked, and
+			// the token was then accepted twice, so an off-grammar pick threw
+			// across cgo and aborted the process.
+			out, err := model.Predict("[INST] Is the sky blue? Answer yes or no. [/INST]",
+				WithGrammar(`root ::= "yes" | "no"`), SetTokens(8))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(out).To(BeElementOf("yes", "no"))
+
+			// A grammar that does not parse is an error, not unconstrained text.
+			_, err = model.Predict(prompt, WithGrammar(`root ::= (`), SetTokens(2))
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("leaves the end-of-generation token out of the result and the callback", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load()
+			defer model.Free()
+
+			// Once "yes" or "no" is complete the grammar allows nothing but an
+			// end-of-generation token, so generation always ends on one.
+			var pieces []string
+			out, err := model.Predict("[INST] Is the sky blue? Answer yes or no. [/INST]",
+				WithGrammar(`root ::= "yes" | "no"`), SetTokens(8),
+				SetTokenCallback(func(piece string) bool {
+					pieces = append(pieces, piece)
+					return true
+				}))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(out).To(BeElementOf("yes", "no"))
+			Expect(strings.Join(pieces, "")).To(Equal(out))
+
+			eos := model.TokenToPiece(model.GetSpecialTokens().EOS, true)
+			Expect(eos).ToNot(BeEmpty())
+			for _, p := range pieces {
+				Expect(p).ToNot(ContainSubstring(eos))
+			}
+		})
+
+		It("trims a stop word from the end of the result as a suffix", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load()
+			defer model.Free()
+
+			// The grammar forces "hello", so generation stops on "lo" at its
+			// end. Trimmed as a set of characters, the "l" before it went too.
+			out, err := model.Predict(prompt, WithGrammar(`root ::= "hello"`), SetStopWords("lo"), SetTokens(8))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(out).To(Equal("hel"))
+		})
+
+		It("applies the SetThreads option to one call and restores the context's setting", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load()
+			defer model.Free()
+			model.SetThreads(2, 3)
+
+			var during [2]int
+			record := SetTokenCallback(func(string) bool {
+				during[0], during[1] = model.Threads()
+				return true
+			})
+
+			_, err := model.Predict(prompt, SetThreads(1), SetTokens(2), SetTemperature(0), record)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(during).To(Equal([2]int{1, 1}))
+			gen, batch := model.Threads()
+			Expect([]int{gen, batch}).To(Equal([]int{2, 3}))
+
+			// Without the option the context's own setting is used.
+			during = [2]int{}
+			_, err = model.Predict(prompt, SetTokens(2), SetTemperature(0), record)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(during).To(Equal([2]int{2, 3}))
+		})
+
+		It("restores the persistent token callback after a per-call one", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load()
+			defer model.Free()
+
+			var persistent, perCall int
+			model.SetTokenCallback(func(string) bool {
+				persistent++
+				return true
+			})
+
+			_, err := model.Predict(prompt, SetTokens(2), SetTemperature(0),
+				SetTokenCallback(func(string) bool {
+					perCall++
+					return true
+				}))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(perCall).To(BeNumerically(">", 0))
+			Expect(persistent).To(Equal(0), "the per-call callback should take precedence")
+
+			// The option used to delete the persistent callback on its way out.
+			_, err = model.Predict(prompt, SetTokens(2), SetTemperature(0))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(persistent).To(BeNumerically(">", 0))
+		})
+
+		It("lets a token callback call SetTokenCallback", func(_ SpecContext) {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load()
+			defer model.Free()
+
+			// The callback used to run under the registry's read lock, so this
+			// call waited on itself forever. The timeout turns a hang into a
+			// failure.
+			calls := 0
+			_, err := model.Predict(prompt, SetTokens(2), SetTemperature(0),
+				SetTokenCallback(func(string) bool {
+					calls++
+					model.SetTokenCallback(nil)
+					return true
+				}))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(calls).To(BeNumerically(">", 0))
+		}, SpecTimeout(2*time.Minute))
+
+		It("returns every token from TokenizeString", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load()
+			defer model.Free()
+
+			// Far more tokens than the SetTokens default of 128, which used to
+			// size the buffer the engine wrote every token into.
+			text := strings.Repeat("hello world ", 100)
+			n, tokens, err := model.TokenizeString(text)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(int(n)).To(Equal(len(tokens)))
+			Expect(len(tokens)).To(BeNumerically(">", DefaultOptions.Tokens))
+			Expect(tokens).To(Equal(model.Tokenize(text, model.GetVocabAddBOS(), true)))
+		})
+
+		It("opens sequence ids above 0 with SetNSeqMax", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			single := load()
+			defer single.Free()
+			Expect(single.ContextParams().NSeqMax).To(Equal(1))
+			_, status := decode(single, prompt, 1)
+			Expect(status).ToNot(Equal(0), "sequence 1 should not exist in a default context")
+
+			multi := load(SetNSeqMax(2))
+			defer multi.Free()
+			Expect(multi.ContextParams().NSeqMax).To(Equal(2))
+			tokens, status := decode(multi, prompt, 1)
+			Expect(status).To(Equal(0))
+			Expect(multi.MemorySeqPosMax(1)).To(Equal(int32(len(tokens) - 1)))
+
+			// More sequences than the engine supports fails the load cleanly.
+			model, err := New(testModelPath, SetContext(128), SetNSeqMax(MaxParallelSequences()+1))
+			Expect(err).To(HaveOccurred())
+			Expect(model).To(BeNil())
+
+			// So do more sequences than the batch holds, which is SetNBatch or
+			// the context size if that is smaller. The engine reserves an
+			// output row per sequence and used to abort when they did not fit.
+			model, err = New(testModelPath, SetContext(128), SetNBatch(16), SetNSeqMax(32))
+			Expect(err).To(HaveOccurred())
+			Expect(model).To(BeNil())
+			model, err = New(testModelPath, SetContext(128), SetNSeqMax(129))
+			Expect(err).To(HaveOccurred())
+			Expect(model).To(BeNil())
+		})
+
+		It("ignores sequence ids the context does not hold", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			// With more than one sequence the KV cache keeps a stream per
+			// sequence and aborts on an id past them, where a single-sequence
+			// cache tolerated it.
+			model := load(SetNSeqMax(2))
+			defer model.Free()
+			tokens, status := decode(model, prompt, 0)
+			Expect(status).To(Equal(0))
+
+			Expect(model.MemorySeqPosMax(2)).To(Equal(int32(-1)))
+			Expect(model.MemorySeqPosMin(2)).To(Equal(int32(-1)))
+			Expect(model.MemorySeqRemove(2, -1, -1)).To(BeFalse())
+			model.MemorySeqCopy(0, 2, -1, -1)
+			model.MemorySeqKeep(2)
+			model.MemorySeqAdd(2, -1, -1, 1)
+			model.MemorySeqDiv(2, -1, -1, 2)
+			Expect(model.MemorySeqPosMax(0)).To(Equal(int32(len(tokens)-1)), "sequence 0 should be untouched")
+
+			data, err := model.SequenceStateData(0)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(model.SetSequenceStateData(data, 2)).ToNot(Succeed())
+			Expect(model.SetSequenceStateDataWith(data, 2, SeqStateAll)).ToNot(Succeed())
+			path := filepath.Join(GinkgoT().TempDir(), "seq.bin")
+			Expect(model.SaveSequenceFile(path, 0, tokens)).To(Succeed())
+			_, err = model.LoadSequenceFile(path, 2)
+			Expect(err).To(HaveOccurred())
+
+			// A negative id means every sequence; the engine accepts only -1.
+			Expect(model.MemorySeqRemove(-2, -1, -1)).To(BeTrue())
+			Expect(model.MemorySeqPosMax(0)).To(Equal(int32(-1)))
+		})
+
+		It("restores a SaveState file into a fresh context", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load()
+			defer model.Free()
+			tokens, status := decode(model, prompt, 0)
+			Expect(status).To(Equal(0))
+
+			path := filepath.Join(GinkgoT().TempDir(), "state.bin")
+			Expect(model.SaveState(path)).To(Succeed())
+
+			// An empty context holds less state than the file. LoadState used
+			// to read only as much as the loading context held.
+			fresh := load()
+			defer fresh.Free()
+			Expect(fresh.StateSize()).To(BeNumerically("<", model.StateSize()))
+			Expect(fresh.LoadState(path)).To(Succeed())
+			Expect(fresh.MemorySeqPosMax(0)).To(Equal(int32(len(tokens) - 1)))
+
+			Expect(fresh.LoadState(filepath.Join(GinkgoT().TempDir(), "missing.bin"))).ToNot(Succeed())
+		})
+
+		It("detaches a backend sampler with a nil chain", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			// Deferred first so it is freed last: a chain must outlive its
+			// attachment.
+			chain := NewSamplerChain()
+			defer chain.Free()
+			chain.Add(SamplerTopK(40))
+			chain.Add(SamplerDist(1234))
+
+			model := load()
+			defer model.Free()
+
+			if !model.SetSequenceSampler(0, chain) {
+				Skip("this context was not built for backend sampling")
+			}
+			_, status := decode(model, prompt, 0)
+			Expect(status).To(Equal(0))
+			Expect(model.SampledToken(-1)).To(BeNumerically(">=", int32(0)))
+
+			// nil used to return false without reaching the engine, leaving the
+			// chain attached.
+			Expect(model.SetSequenceSampler(0, nil)).To(BeTrue())
+			model.MemoryClear(true)
+			_, status = decode(model, prompt, 0)
+			Expect(status).To(Equal(0))
+			Expect(model.SampledToken(-1)).To(Equal(int32(-1)))
+		})
+
+		It("makes a second Free a no-op", func() {
+			// A nil model needs no TEST_MODEL.
+			var none *LLama
+			none.Free()
+
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load()
+			model.Free()
+			// This used to free the context and model a second time; reaching
+			// the end of the spec is the check.
+			model.Free()
+		})
+
+		It("rejects a Decode batch larger than NBatch instead of aborting", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load(SetNBatch(16))
+			defer model.Free()
+			nBatch := model.ContextParams().NBatch
+			Expect(nBatch).To(Equal(16))
+
+			tok := model.Tokenize("hello", false, false)[0]
+			batch := NewBatch(nBatch+1, 1)
+			defer batch.Free()
+			for i := 0; i <= nBatch; i++ {
+				Expect(batch.Add(tok, int32(i), nil, i == nBatch)).To(Succeed())
+			}
+			Expect(model.Decode(batch)).To(Equal(-1))
+		})
+
+		It("rejects an Encode batch larger than NUbatch instead of aborting", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load(SetNBatch(16))
+			defer model.Free()
+			nUbatch := model.ContextParams().NUbatch
+			Expect(nUbatch).To(Equal(16))
+
+			// An encoder pass cannot be split into micro-batches, and the
+			// engine asserts on one larger than NUbatch before it looks at
+			// whether the model has an encoder at all.
+			tok := model.Tokenize("hello", false, false)[0]
+			batch := NewBatch(nUbatch+1, 1)
+			defer batch.Free()
+			for i := 0; i <= nUbatch; i++ {
+				Expect(batch.Add(tok, int32(i), nil, true)).To(Succeed())
+			}
+			Expect(model.Encode(batch)).To(Equal(-1))
+		})
+
+		It("feeds Predict a prompt longer than NBatch in chunks", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load(SetContext(256), SetNBatch(16))
+			defer model.Free()
+
+			long := strings.Repeat("The quick brown fox jumps over the lazy dog. ", 4)
+			Expect(len(model.Tokenize(long, true, false))).To(BeNumerically(">", model.ContextParams().NBatch))
+
+			// The default SetBatch(512) used to go to the engine as one batch
+			// of the whole prompt, which it aborts on.
+			_, err := model.Predict(long, SetTokens(2), SetTemperature(0))
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("applies DRY with the default look-back window of -1", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load()
+			defer model.Free()
+
+			// llama.cpp now clamps a negative window to 0, which disables the
+			// stage; the binding resolves -1 to the context size first.
+			byDefault := model.SamplerDRY(0.8, 1.75, 2, -1)
+			defer byDefault.Free()
+			Expect(byDefault.Name()).To(Equal("dry"))
+			disabled := model.SamplerDRY(0.8, 1.75, 2, 0)
+			defer disabled.Free()
+			Expect(disabled.Name()).To(Equal("?dry"))
+			// The engine allocates the whole window up front, so this one
+			// asked for about 16 GiB and ended the process. It is cut to the
+			// context size.
+			huge := model.SamplerDRY(0.8, 1.75, 2, math.MaxInt32)
+			defer huge.Free()
+			Expect(huge.Name()).To(Equal("dry"))
+
+			// Predict builds its DRY stage the same way. Top-k 1 makes the
+			// output deterministic, and with only 8 tokens generated a window
+			// of 64 behaves exactly like one the size of the context.
+			repetitive := strings.TrimSpace(strings.Repeat("dog ", 16))
+			predict := func(lastN int) string {
+				out, err := model.Predict(repetitive, SetTokens(8), SetTemperature(0.5), SetTopK(1),
+					SetDRYMultiplier(50), SetDRYAllowedLength(1), SetDRYPenaltyLastN(lastN))
+				Expect(err).ToNot(HaveOccurred())
+				return out
+			}
+			window := predict(64)
+			if window == predict(0) {
+				Skip("DRY does not change this model's output for the prompt")
+			}
+			Expect(predict(-1)).To(Equal(window))
+		})
+
+		It("renders token ids outside the vocabulary as nothing instead of aborting", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load()
+			defer model.Free()
+			nVocab := int32(model.GetModelInfo().VocabSize)
+			valid := model.Tokenize("hello", false, false)
+			Expect(valid).ToNot(BeEmpty())
+			Expect(model.TokenToPiece(valid[0], true)).ToNot(BeEmpty())
+			Expect(model.Detokenize(valid, false, false)).ToNot(BeEmpty())
+
+			// llama.cpp throws std::out_of_range for each of these, which
+			// aborted the process from inside cgo.
+			for _, tok := range []int32{-1, nVocab, nVocab + 1000} {
+				Expect(model.TokenToPiece(tok, true)).To(BeEmpty())
+				Expect(model.TokenToPiece(tok, false)).To(BeEmpty())
+				Expect(model.Detokenize([]int32{tok}, false, true)).To(BeEmpty())
+				withBad := append(append([]int32(nil), valid...), tok)
+				Expect(model.Detokenize(withBad, false, false)).To(BeEmpty())
+				Expect(model.IsEOG(tok)).To(BeFalse())
+				Expect(model.IsControlToken(tok)).To(BeFalse())
+			}
+		})
+
+		It("reports no sequence state for ids the context does not hold", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load(SetNSeqMax(2))
+			defer model.Free()
+			tokens, status := decode(model, prompt, 0)
+			Expect(status).To(Equal(0))
+			Expect(model.SequenceStateSize(0)).To(BeNumerically(">", 0))
+			Expect(model.SequenceStateSize(-1)).To(BeNumerically(">", 0), "-1 means every sequence")
+
+			// The engine described 2, past NSeqMax, as an empty sequence and
+			// wrote it out. Past LLAMA_MAX_SEQ (256), the KV cache's sequence
+			// bitset throws std::out_of_range. -2 is neither a sequence nor -1.
+			dir := GinkgoT().TempDir()
+			for _, seq := range []int32{2, 300, -2} {
+				Expect(model.SequenceStateSize(seq)).To(BeZero())
+				Expect(model.SequenceStateSizeWith(seq, SeqStatePartialOnly)).To(BeZero())
+				_, err := model.SequenceStateData(seq)
+				Expect(err).To(HaveOccurred())
+				_, err = model.SequenceStateDataWith(seq, SeqStateAll)
+				Expect(err).To(HaveOccurred())
+				path := filepath.Join(dir, "seq"+strconv.Itoa(int(seq))+".bin")
+				Expect(model.SaveSequenceFile(path, seq, tokens)).ToNot(Succeed())
+				Expect(path).ToNot(BeAnExistingFile())
+			}
+			Expect(model.MemorySeqPosMax(0)).To(Equal(int32(len(tokens)-1)), "sequence 0 should be untouched")
+		})
+
+		It("refuses sampler tokens a stage cannot take instead of aborting", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load()
+			defer model.Free()
+			_, status := decode(model, prompt, 0)
+			Expect(status).To(Equal(0))
+			nVocab := int32(model.GetModelInfo().VocabSize)
+			offGrammar := model.Tokenize(" maybe", false, false)
+			Expect(offGrammar).ToNot(BeEmpty())
+			const yesNo = `root ::= "yes" | "no"`
+
+			// A grammar stage threw std::out_of_range for an id outside the
+			// vocabulary and std::runtime_error for a token its grammar does
+			// not allow, both across cgo, and aborted on end-of-generation
+			// before its grammar was complete. Accept refuses them all, so
+			// the grammar has not moved and still constrains Sample.
+			chain := NewSamplerChain()
+			defer chain.Free()
+			chain.Add(model.SamplerGrammar(yesNo, "root"))
+			chain.Add(SamplerGreedy())
+			Expect(chain.Len()).To(Equal(2))
+			for _, tok := range []int32{-1, nVocab, nVocab + 1000, offGrammar[0], model.GetSpecialTokens().EOS} {
+				chain.Accept(tok)
+			}
+			tok := chain.Sample(model, -1)
+			Expect([]string{"y", "ye", "yes", "n", "no"}).To(ContainElement(model.TokenToPiece(tok, true)))
+
+			// With the grammar after the stage that picks, a pick it does not
+			// allow threw from inside Sample, and left the grammar in a state
+			// llama.cpp asserts on the next time it is applied. The bias
+			// forces such a pick each time; the second Sample shows the
+			// grammar was restarted.
+			misordered := NewSamplerChain()
+			defer misordered.Free()
+			misordered.Add(model.SamplerLogitBias([]LogitBias{{Token: offGrammar[0], Bias: 1000}}))
+			misordered.Add(SamplerGreedy())
+			misordered.Add(model.SamplerGrammar(yesNo, "root"))
+			Expect(misordered.Len()).To(Equal(3))
+			Expect(misordered.Sample(model, -1)).To(Equal(int32(-1)))
+			Expect(misordered.Sample(model, -1)).To(Equal(int32(-1)))
+
+			// An adaptive-p stage that has not sampled yet asserted on -1,
+			// and Sample on an empty Sampler (an unparsable grammar)
+			// dereferenced a null pointer.
+			adaptive := SamplerAdaptiveP(0.5, 0.9, 42)
+			defer adaptive.Free()
+			adaptive.Accept(-1)
+			empty := model.SamplerGrammar("not a grammar", "root")
+			Expect(empty.Sample(model, -1)).To(Equal(int32(-1)))
+		})
+
+		It("restores on-device sequence state only from its latest capture", func() {
+			if testModelPath == "" {
+				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
+			}
+			model := load(SetNSeqMax(2))
+			defer model.Free()
+			tokens, status := decode(model, prompt, 0)
+			Expect(status).To(Equal(0))
+			last := int32(len(tokens) - 1)
+
+			// No on-device capture of sequence 0 exists yet; llama.cpp
+			// asserted on these host bytes restored with SeqStateOnDevice.
+			host, err := model.SequenceStateDataWith(0, SeqStateAll)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(model.SetSequenceStateDataWith(host, 1, SeqStateOnDevice)).ToNot(Succeed())
+
+			first, err := model.SequenceStateDataWith(0, SeqStateOnDevice)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(model.SetSequenceStateDataWith(first, 1, SeqStateOnDevice)).To(Succeed())
+			Expect(model.MemorySeqPosMax(1)).To(Equal(last))
+
+			// Other flags, or bytes that are not the capture's, are refused.
+			Expect(model.SetSequenceStateDataWith(first, 1, SeqStateOnDevice|SeqStatePartialOnly)).ToNot(Succeed())
+			tampered := append([]byte(nil), first...)
+			tampered[len(tampered)-1] ^= 0xff
+			Expect(model.SetSequenceStateDataWith(tampered, 1, SeqStateOnDevice)).ToNot(Succeed())
+			Expect(model.SetSequenceStateDataWith(first[:4], 1, SeqStateOnDevice)).ToNot(Succeed())
+
+			// A new capture of sequence 0 replaces the context's snapshot. The
+			// first bytes describe one cell fewer than it now holds, which
+			// llama.cpp aborted on.
+			batch := NewBatch(1, 1)
+			defer batch.Free()
+			Expect(batch.Add(tokens[0], last+1, []int32{0}, true)).To(Succeed())
+			Expect(model.Decode(batch)).To(Equal(0))
+			second, err := model.SequenceStateDataWith(0, SeqStateOnDevice)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(model.SetSequenceStateDataWith(first, 1, SeqStateOnDevice)).ToNot(Succeed())
+			Expect(model.SetSequenceStateDataWith(second, 1, SeqStateOnDevice)).To(Succeed())
+			Expect(model.MemorySeqPosMax(1)).To(Equal(last + 1))
 		})
 	})
 	Context("Inferencing tests with GPU (using "+testModelPath+") ", Label("gpu"), func() {

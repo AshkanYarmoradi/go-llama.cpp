@@ -45,6 +45,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `scripts/check-binding-symbols.sh`, which fails the build if `binding.h`
   declares a function `binding.cpp` does not define — previously a link-time
   error that only surfaced twenty minutes into CI.
+- **`SetNSeqMax(n)`**, a `ModelOption` for llama.cpp's `n_seq_max`: how many
+  distinct sequences a context can hold. Contexts were always created with
+  one, so `Decode` rejected any batch using a sequence id above 0, and
+  `MemorySeqCopy` or restoring state into another sequence id could not be
+  used. The default stays llama.cpp's 1; `ContextParams().NSeqMax` reports the
+  value in effect. `New` fails if `n` exceeds `MaxParallelSequences()` or the
+  context's batch size (the smaller of `SetNBatch` and `SetContext`), which
+  the engine would otherwise abort on. The `MemorySeq` methods and the
+  sequence state reads, restores and files treat an id at or above `NSeqMax`
+  as a sequence that is not there. With more than one sequence, the engine
+  aborted on such an id in the `MemorySeq` methods and the restores; the
+  reads reported it as an empty sequence, except on a DeepSeek-V4 cache (see
+  Fixed).
 
 ### Changed
 
@@ -65,6 +78,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   opt-in (`workflow_dispatch` or the `gpu` label) instead of leaving a queued
   check on every PR for 24 hours. A new Lint workflow runs gofmt, vet and a
   `binding.cpp` compile check in about a minute.
+- **RoPE now defaults to the model's trained values.** `DefaultModelOptions`
+  set `FreqRopeBase: 10000` and `FreqRopeScale: 1.0`, and the binding passed
+  both to every context, overriding what the GGUF file says. A model trained
+  with another base ran with the wrong positional encoding and degraded
+  output: the CodeLlama model CI tests with was trained with 1,000,000, and
+  Llama 3 uses 500,000. Both now default to 0, which means "from the model".
+  `WithRopeFreqBase` and `WithRopeFreqScale` still override; pass
+  `WithRopeFreqBase(10000), WithRopeFreqScale(1)` for the old behaviour.
+- **The `SetThreads` `PredictOption` works, for one call.** It was stored and
+  never read, so `Predict` always ran on the context's thread count (llama.cpp
+  starts it at 4). It now sets the thread count for generation and prompt
+  processing for that call and restores the context's setting afterwards.
+  `DefaultOptions.Threads` is now 0, which keeps the context's setting; change
+  that with `(*LLama).SetThreads(n, nBatch)`.
+- **`WithGrammar` with a grammar that does not parse makes `Predict` fail**
+  instead of generating unconstrained text.
+- `Embeddings` tokenizes with the model's special tokens (`add_special`), as
+  llama.cpp's embedding example does. It used to add them only when the
+  vocabulary asks for BOS, so vectors change for models that add EOS or SEP
+  but not BOS.
+- `Embeddings`, `TokenEmbeddings` and `TokenizeString` ignore their
+  `PredictOption` arguments. The only one they used, `SetTokens`, sized the
+  output buffers behind the overruns listed under Fixed.
+
+### Deprecated
+
+- Options that have no effect are now marked `Deprecated: has no effect.`, so
+  staticcheck and editors flag them. They were already ignored, so nothing
+  changes at run time: `IgnoreEOS`, `EnableF16KV`, `SetPathPromptCache`,
+  `EnablePromptCacheAll`, `EnablePromptCacheRO`, `SetMlock`, `SetMemoryMap`,
+  `SetPredictionMainGPU`, `SetPredictionTensorSplit`, the predict-side
+  `SetRopeFreqBase` and `SetRopeFreqScale` (use `WithRopeFreqBase` and
+  `WithRopeFreqScale` at load), `SetNDraft`, `SetTailFreeSamplingZ`,
+  `SetPenalizeNL`, `SetModelSeed`, `EnableF16Memory`, `EnabelLowVRAM` and
+  `SetLoraBase`, along with the `ModelOptions` and `PredictOptions` fields
+  behind them.
 
 ### Fixed
 
@@ -85,6 +134,145 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `LoadMode.String` or `FlashAttnTypeName` with a value outside the enum, all
   killed the process. They now return `LoadModeAuto`, `"LoadMode(n)"` and `""`
   respectively.
+- **`Embeddings` and `TokenEmbeddings` overran the Go heap.** The output
+  buffer was sized from `SetTokens`, 128 floats by default (with
+  `SetTokens(0)`, 99,999,999 for `Embeddings` and 9,999,999 for
+  `TokenEmbeddings`), while the engine wrote `n_embd` floats into it: 4096
+  for a 7B model. They now return exactly one vector of the model's embedding
+  width, and the C side never writes past the buffer it is given.
+- **`Embeddings` returned the same vector for every input** of a generative
+  model. It read the first output row, which is the hidden state of the BOS
+  token. It now returns the pooled sequence embedding when the context pools
+  (`ContextParams().Pooling` is not `PoolingNone`), and otherwise the last
+  token's. `TokenEmbeddings` embeds the token ids as given; it used to
+  detokenize them and tokenize the text again, adding a second BOS. Input
+  longer than `ContextParams().NBatch` returns an error instead of aborting
+  the process, as does a `TokenEmbeddings` token id outside the vocabulary.
+- **`SetEmbeddings` did not change what `Embeddings` accepts.** A model loaded
+  without `EnableEmbeddings` kept returning "model loaded without embeddings"
+  after `SetEmbeddings(true)`, contrary to its documentation.
+- **`WithGrammar` did not constrain `Predict` and could abort the process.**
+  The grammar stage ran after the token had already been picked, and every
+  token was then accepted twice, so an off-grammar pick threw a C++ exception
+  across cgo. The grammar now runs first. Accepting each token twice also
+  counted it twice in the repetition-penalty history of every `Predict` call,
+  grammar or not; each token is now accepted once. Any C++ exception inside
+  `Predict` now returns "inference failed" instead of aborting.
+- **`Predict` included the end-of-generation token's text**, such as `</s>`,
+  at the end of its result and passed it to the token callback.
+- **`SetStopWords` trimmed a character set, not the stop word.** It used
+  `strings.TrimRight`, which also removed any trailing characters that occur
+  in the stop word: output `hello` with stop word `lo` came back as `he`. It
+  now uses `strings.TrimSuffix` and returns `hel`.
+- **`TokenizeString` overran the Go heap** on text longer than its token
+  limit (128 by default). It now returns every token.
+- **`Predict` leaked C memory on every call**: the prompt and every option
+  string, plus the whole parameter block when it failed. `TokenizeString`,
+  `Embeddings` and `TokenEmbeddings` leaked the same way.
+- **`LoadState` failed on a fresh context.** It read only as many bytes as the
+  loading context's own state held, so a file saved from a fuller context was
+  cut short. It now reads the whole file.
+- **The `SetTokenCallback` `PredictOption` deleted the persistent callback**
+  set with `(*LLama).SetTokenCallback` after a successful call, and stayed
+  registered after a failed one. It now applies to its call only, and the
+  persistent callback is back in effect afterwards. A token callback can also
+  call `SetTokenCallback` itself, which used to deadlock.
+- **`SetSequenceSampler(seq, nil)` did not detach a backend sampler**: it
+  returned `false` without reaching the engine. It now detaches and returns
+  `true`, as does a chain with no stages. Passing a bare stage instead of a
+  chain returns `false`; the engine used to read it as a chain.
+- **`MemorySeqRemove` with a negative sequence id other than -1 aborted the
+  process**, although a negative id is documented to match every sequence.
+  It now does.
+- **Calling `Free` twice freed the model twice.** The second call is now a
+  no-op, as is `Free` on a nil `*LLama`.
+- **Oversized batches aborted the process.** `Decode` with more tokens than
+  `ContextParams().NBatch` hit an engine assertion; it now returns -1, as does
+  `Encode` beyond `NUbatch`. `Predict` sent its prompt in chunks of `SetBatch`
+  (512 by default) whatever the context accepted, so a prompt longer than a
+  smaller `NBatch` aborted; the chunks are now capped at `NBatch`.
+- **A full context aborted the process on models whose cache cannot shift**
+  (`MemoryCanShift` false), such as the M-RoPE models Qwen2-VL, Qwen3-VL and
+  Qwen3.5; Step-3.5 aborted one decode later, and DeepSeek-V4 produced wrong
+  output instead. `Predict` shifted the KV cache without checking
+  `llama_memory_can_shift`, and llama.cpp asserts in `seq_add` on those
+  caches; `MemorySeqAdd` and `MemorySeqDiv` reached the same assertion.
+  `Predict` now stops at a full context on such a model and returns what it
+  generated, as llama.cpp's CLI does, and both methods do nothing when
+  `MemoryCanShift` is false. The CI model can shift, so no spec reaches the
+  new path.
+- **DRY never ran unless `SetDRYPenaltyLastN` was given a positive window.**
+  The default window, -1, is documented as the context size, but since
+  llama.cpp `a6aa6f545` (the change that also dropped `n_ctx_train`, see the
+  v0.3.0 build fix above) `llama_sampler_init_dry` clamps a negative window to
+  0, which disables the stage. So `SetDRYMultiplier` alone left `Predict`
+  unchanged, and `SamplerDRY(m, b, n, -1)` built an empty stage (`Name()`
+  reported `"?dry"`). The binding now resolves a negative window to the
+  context size, `ContextParams().NCtx`, itself; 0 still disables DRY. A
+  larger window is now cut to the context size as well: the engine allocates
+  the whole window up front, so a window such as `math.MaxInt32` asked for
+  about 16 GiB and ended the process when that could not be had. Should the
+  allocation still fail, `SamplerDRY` returns an empty `Sampler`, which `Add`
+  ignores.
+- **`SetTensorSplit` values could leak from one `New` into the next.** The
+  split was parsed into a function-level static array that was never cleared,
+  so a model loaded with a shorter split than an earlier one inherited the
+  earlier split's trailing proportions, and concurrent `New` calls wrote the
+  same array. Each load now parses into its own zeroed buffer of
+  `MaxDevices()` entries, the number the engine reads.
+- **`TokenToPiece` and `Detokenize` aborted the process on a token id outside
+  the vocabulary.** llama.cpp throws `std::out_of_range` for one, and the
+  exception crossed cgo. `TokenToPiece` now returns `""` for such a token and
+  `Detokenize` returns `""` when any token is out of range, as `TokenText`
+  already did. `TokenToPiece`, `TokenText`, `TokenScore`, `TokenAttr` and
+  `IsControlToken` also return their empty value for every token of a model
+  without a vocabulary (`VocabNone`, such as an audio codec), on which
+  llama.cpp asserts.
+- **`Sampler.Accept` and `Sampler.Sample` could abort the process.** A
+  grammar stage throws `std::out_of_range` for a token id outside the
+  vocabulary and `std::runtime_error` for a token its grammar does not allow,
+  and both crossed cgo. An end-of-generation token offered before the grammar
+  was complete, or -1 offered to an adaptive-p stage that had not sampled
+  yet, aborted inside llama.cpp. `Accept` now ignores a negative id and asks
+  the grammar stages first: a token one of them would refuse is recorded by
+  no stage, and the reason goes to stderr. `Sample` returns -1 when a stage
+  throws, which a grammar stage does when it comes after a truncation or
+  picking stage and is handed a token it does not allow. It then restarts
+  the chain's grammar stages, because llama.cpp leaves a grammar that refused
+  a token unable to continue and asserts the next time it is applied. Such a
+  pick that is an end-of-generation token still aborts inside llama.cpp, so
+  grammar stages belong first in the chain. `Sample` on an empty `Sampler`
+  returns -1 instead of crashing.
+- **`SetSequenceStateDataWith` with `SeqStateOnDevice` could abort the
+  process.** An on-device capture leaves the data in the context, one
+  snapshot per sequence id, and returns only the cell layout. llama.cpp
+  asserted when the bytes named a sequence with no snapshot (bytes captured
+  on the host or by another `LLama`), aborted when they no longer matched the
+  snapshot (an earlier capture of the same sequence, or other flags), and
+  where the sizes happened to agree restored the newer data into the older
+  layout. The binding now remembers the latest on-device capture of each
+  sequence and restores only those bytes with those flags; anything else
+  returns an error. On a recurrent or hybrid model holding more than one
+  sequence, capturing sequence -1 on the device aborted too; its size is now
+  0 and the capture returns an error.
+- **Sequence state reads accepted sequence ids the context does not hold.**
+  `SequenceStateSize`, `SequenceStateData`, their `With` variants and
+  `SaveSequenceFile` now follow the rule the restores use: an id outside
+  `[0, NSeqMax)`, other than -1 for every sequence, is not there. The size is
+  0, and the others return an error without writing a file. The engine
+  reported an id from `NSeqMax` to 255 as an empty sequence, and
+  `SaveSequenceFile` wrote a file for it, except on a DeepSeek-V4 cache
+  holding more than one sequence, where such an id aborted the process. Past
+  255, its per-cell sequence bitset throws `std::out_of_range`, which only a
+  `catch` inside llama.cpp kept from crossing cgo.
+- `TokenEmbedding` and `SequenceEmbedding` always read `n_embd` floats. For a
+  model whose output embedding width is smaller than `n_embd` that read past
+  the engine's row, as it did for a reranker, whose row is its scores; where
+  the output width is larger it returned a truncated row.
+- Wrong doc comments: `SetMMap`, `SetTensorSplit`, `NewModelOptions`, the
+  `SetTokenCallback` option, `SetRepeat` (it is the penalty look-back window)
+  and `SetNKeep`. `Sampler.Sample` now documents that it already accepts the
+  token, so callers must not `Accept` it again.
 
 ## Earlier
 
