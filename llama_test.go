@@ -307,7 +307,7 @@ how much is 2+2?
 			Expect(model).ToNot(BeNil())
 
 			// Predict once so the context holds real logits to sample from.
-			_, err = model.Predict("The capital of France is")
+			_, err = model.Predict("The capital of France is", SetTokens(4))
 			Expect(err).ToNot(HaveOccurred())
 
 			chain := NewSamplerChain()
@@ -1447,7 +1447,7 @@ how much is 2+2?
 			Expect(err).ToNot(HaveOccurred())
 			defer model.Free()
 
-			_, err = model.Predict("The capital of France is")
+			_, err = model.Predict("The capital of France is", SetTokens(4))
 			Expect(err).ToNot(HaveOccurred())
 
 			// d <= 1 must be a no-op: d == 0 used to reach an integer division by

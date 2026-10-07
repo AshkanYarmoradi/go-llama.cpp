@@ -164,7 +164,7 @@ endif
 ifeq ($(BUILD_TYPE),metal)
 	EXTRA_LIBS=
 	CGO_LDFLAGS+="-framework Accelerate -framework Foundation -framework Metal -framework MetalKit -framework MetalPerformanceShaders"
-	CMAKE_ARGS+=-DLLAMA_METAL=ON
+	CMAKE_ARGS+=-DGGML_METAL=ON
 	EXTRA_TARGETS+=llama.cpp/ggml-metal.o
 endif
 

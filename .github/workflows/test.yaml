@@ -65,9 +65,13 @@ jobs:
       # You can test your matrix by printing the current Go version
       - name: Display Go version
         run: go version
+      # The CPU path. llama.cpp builds Metal by default on Apple and ignores the
+      # old LLAMA_* option names, so it has to be switched off as GGML_METAL.
+      # Left on, this job silently ran on the runner's paravirtual GPU, which
+      # is ~30x slower than CPU and pushed the suite past Ginkgo's 1h timeout.
       - name: Test
         run: |
-          CMAKE_ARGS="-DLLAMA_METAL=OFF -DLLAMA_F16C=OFF -DLLAMA_AVX512=OFF -DLLAMA_AVX2=OFF -DLLAMA_FMA=OFF" make test
+          CMAKE_ARGS="-DGGML_METAL=OFF" make test
 
   macOS-metal-latest:
     runs-on: macOS-latest
@@ -88,5 +92,5 @@ jobs:
         run: go version
       - name: Test
         run: |
-          CMAKE_ARGS="-DLLAMA_F16C=OFF -DLLAMA_AVX512=OFF -DLLAMA_AVX2=OFF -DLLAMA_FMA=OFF" make BUILD_TYPE=metal test
+          make BUILD_TYPE=metal test
           CGO_LDFLAGS="-framework Foundation -framework Metal -framework MetalKit -framework MetalPerformanceShaders" LIBRARY_PATH=$PWD C_INCLUDE_PATH=$PWD go build -o testbuild ./examples
