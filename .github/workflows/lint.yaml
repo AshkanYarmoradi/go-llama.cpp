@@ -86,3 +86,16 @@ jobs:
 
       - name: Every binding.h declaration is defined
         run: bash ./scripts/check-binding-symbols.sh
+
+      # docs/engine-coverage.md is generated from llama.h and binding.cpp, so a
+      # llama.cpp bump or a new wrapper can leave it behind. That is a warning,
+      # never a failure: a Dependabot bump must not be blocked by a doc.
+      - name: Engine coverage page is current
+        run: |
+          status=0
+          bash ./scripts/engine-coverage.sh --check || status=$?
+          case "$status" in
+            0) ;;
+            1) echo "::warning file=docs/engine-coverage.md,title=Engine coverage page is out of date::Run ./scripts/engine-coverage.sh --write and commit the result." ;;
+            *) echo "::warning title=Engine coverage scan failed::scripts/engine-coverage.sh exited with status $status; see the step log." ;;
+          esac

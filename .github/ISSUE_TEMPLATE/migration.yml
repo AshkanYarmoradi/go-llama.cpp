@@ -1,0 +1,161 @@
+name: Migration problem from go-skynet
+description: Something broke or behaves differently after moving from go-skynet/go-llama.cpp
+labels: [migration]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please read the
+        [migration guide](https://github.com/AshkanYarmoradi/go-llama.cpp/blob/main/docs/migrating-from-go-skynet.md).
+        Its removed-API table and its list of behaviour that changed without a
+        compile error (RoPE defaults, min-p sampling, prompt caching,
+        embeddings) explain most migration surprises.
+
+        Options that still compile but no longer do anything are marked
+        `Deprecated`. To list the ones your code uses:
+        `go run honnef.co/go/tools/cmd/staticcheck@latest -checks SA1019 ./...`
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of problem is it?
+      options:
+        - It no longer compiles
+        - It does not build or link (make, cgo, build tags)
+        - It compiles but behaves differently
+        - It is slower or uses more memory
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: old-commit
+    attributes:
+      label: go-skynet commit you used
+      description: >
+        `git -C <old checkout> rev-parse HEAD`, or the pseudo-version from your
+        go.mod. go-skynet's last commit is 6a8041e.
+      placeholder: 6a8041ef6b46d4712afc3ae791d1c2d73da0ad1c
+    validations:
+      required: true
+
+  - type: input
+    id: old-submodule
+    attributes:
+      label: Old llama.cpp submodule commit
+      description: >
+        `git -C <old checkout>/llama.cpp rev-parse HEAD`. Leave it empty if you
+        never changed go-skynet's pin (ac43576).
+      placeholder: ac43576124a75c2de6e333ac31a3444ff9eb9458
+
+  - type: input
+    id: new-commit
+    attributes:
+      label: go-llama.cpp commit you moved to
+      description: "`git rev-parse HEAD` in your clone of this repository"
+    validations:
+      required: true
+
+  - type: input
+    id: new-submodule
+    attributes:
+      label: New llama.cpp submodule commit
+      description: "`git -C llama.cpp rev-parse HEAD` in your clone of this repository"
+    validations:
+      required: true
+
+  - type: input
+    id: call
+    attributes:
+      label: Option or call involved
+      description: The function, method or option, as it appears in your code.
+      placeholder: 'model.Predict(prompt, llama.SetStopWords("###"))'
+    validations:
+      required: true
+
+  - type: textarea
+    id: code
+    attributes:
+      label: Code
+      description: >
+        The smallest program or snippet that shows the difference, including
+        every option you pass to `New` and `Predict`.
+      render: go
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What go-skynet did
+      description: The output, error or numbers you got before the move.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happens now
+      description: The output, error or numbers you get with this repository.
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: Name, quantization and source, e.g. "CodeLlama-7B-Instruct Q2_K from TheBloke".
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Build type
+      description: >
+        The `BUILD_TYPE` you built `libbinding.a` with now. `clblas` was
+        removed along with llama.cpp's CLBlast backend, and `make` stops with
+        an error that points to `vulkan`.
+      options:
+        - CPU (default; includes Metal on Apple)
+        - metal (Apple)
+        - cublas (NVIDIA CUDA)
+        - hipblas (AMD ROCm)
+        - vulkan
+        - openblas
+        - blis
+    validations:
+      required: true
+
+  - type: textarea
+    id: build
+    attributes:
+      label: Build commands
+      description: >
+        The `make` and `go build` or `go test` commands you ran, with any
+        `BUILD_TYPE`, `CMAKE_ARGS`, `CGO_LDFLAGS` and `-tags`. A GPU or BLAS
+        build needs the matching tag, such as `-tags cublas`, rather than
+        libraries in `CGO_LDFLAGS`. Switching `BUILD_TYPE` rebuilds llama.cpp
+        on its own; after changing only `CMAKE_ARGS`, run `make clean` first.
+      render: shell
+      placeholder: |
+        make BUILD_TYPE=cublas libbinding.a
+        LIBRARY_PATH=$PWD C_INCLUDE_PATH=$PWD go build -tags cublas ./...
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: >
+        OS and version, Go version (`go version`), compiler version, and for a
+        GPU build the CUDA, ROCm or Vulkan SDK version.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output
+      description: >
+        Compiler errors or runtime output. llama.cpp logs to stderr, or to your
+        `SetLogHandler` if you installed one; the binding's own warnings
+        always go to stderr. Include both; they usually name the cause.
+      render: shell
