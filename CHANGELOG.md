@@ -58,6 +58,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   aborted on such an id in the `MemorySeq` methods and the restores; the
   reads reported it as an empty sequence, except on a DeepSeek-V4 cache (see
   Fixed).
+- **Vulkan backend.** `make BUILD_TYPE=vulkan libbinding.a`, then
+  `go build -tags vulkan`. It is the one vendor-neutral GPU backend (NVIDIA,
+  AMD and Intel) and needs no proprietary SDK, only the Vulkan headers and
+  loader, `glslc` and SPIRV-Headers.
+- Build tags `vulkan`, `hipblas` and `blis`, joining `cublas` and `openblas`.
+  Each `llama_<tag>.go` carries its backend's link flags, so a GPU or BLAS
+  build no longer needs `CGO_LDFLAGS`.
+- CI: a GPU builds workflow compiles and links `BUILD_TYPE=cublas` (in the
+  `nvidia/cuda` image) and `BUILD_TYPE=vulkan` on GPU-less hosted runners on
+  every PR. It checks that the backend's objects are in `libbinding.a` and that
+  the binaries link its libraries, so the GPU build types can no longer rot
+  unnoticed. The Lint workflow now vets every build tag.
 
 ### Changed
 
@@ -101,6 +113,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `Embeddings`, `TokenEmbeddings` and `TokenizeString` ignore their
   `PredictOption` arguments. The only one they used, `SetTokens`, sized the
   output buffers behind the overruns listed under Fixed.
+- **The GPU and BLAS build types work again.** `BUILD_TYPE=cublas`, `hipblas`,
+  `openblas` and `blis` passed `LLAMA_*` CMake options that llama.cpp no longer
+  reads: `LLAMA_CUBLAS` stopped the configure step, and the rest were ignored,
+  so those builds came out CPU-only without a word. They now pass the `GGML_*`
+  options: `GGML_CUDA` (with `GGML_CUDA_NCCL=OFF`), `GGML_HIP`, and
+  `GGML_BLAS` with the OpenBLAS or BLIS vendor. The `openblas` and `blis`
+  builds need pkg-config, which ggml-blas uses to find the BLAS headers, unless
+  `CMAKE_ARGS` sets `-DBLAS_INCLUDE_DIRS`.
+- **GPU and BLAS builds link with `go build -tags <type>`, not
+  `CGO_LDFLAGS`.** cmd/go puts `CGO_LDFLAGS` before the package's own
+  `-lbinding`, where an `--as-needed` linker drops the libraries; the tag
+  file's flags come after it. `make test` passes the tag itself, and
+  `GPU_TESTS=true` no longer overrides `CGO_LDFLAGS`.
+
+      make BUILD_TYPE=cublas libbinding.a
+      LIBRARY_PATH=$PWD C_INCLUDE_PATH=$PWD go build -tags cublas ./...
+
+- The `cublas` tag also links `cublasLt` and the CUDA driver library
+  (`-lcuda`, found in the toolkit's `lib64/stubs` on hosts without a driver).
+  ggml-cuda calls the driver API, so the link failed without it.
+- `hipblas` compiles only the HIP sources with ROCm's clang, through `HIPCXX`
+  as llama.cpp documents, and leaves `CC`/`CXX` alone. Needs ROCm 6.1 or newer.
+  `GPU_TARGETS` is passed as the `;`-separated list CMake expects; a
+  comma-separated one still works.
+- The Makefile builds llama.cpp in parallel (`JOBS`, default: the CPU count)
+  and skips its tools and the `llama` app, which the binding never links.
+  `libbinding.a` is recreated rather than appended to, and leaves out CMake's
+  compiler-identification objects and the Vulkan shader generator.
+  Changing `BUILD_TYPE` now rebuilds llama.cpp from scratch on its own;
+  changing only `CMAKE_ARGS` still needs `make clean`.
+- `CMAKE_ARGS` given on the make command line now adds to the build type's
+  options. It used to replace them, so `make BUILD_TYPE=cublas CMAKE_ARGS=...`
+  built CPU-only. A `BUILD_TYPE` the Makefile does not know (`cuda`, say) now
+  stops with an error instead of building CPU-only.
+- CI: the GPU tests workflow builds in the `nvidia/cuda` image and passes only
+  if CUDA found a device and layers were offloaded to it. It used to grep for
+  a log line llama.cpp no longer prints, so it could not pass. Pushes to `main`
+  and tags run it only once the `GPU_RUNNER` repository variable is `true`, instead of
+  queueing for 24 hours with no runner attached.
 
 ### Deprecated
 
@@ -114,6 +165,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `SetPenalizeNL`, `SetModelSeed`, `EnableF16Memory`, `EnabelLowVRAM` and
   `SetLoraBase`, along with the `ModelOptions` and `PredictOptions` fields
   behind them.
+
+### Removed
+
+- **`BUILD_TYPE=clblas`.** llama.cpp removed its CLBlast backend, so this build
+  type had been producing CPU-only builds. `make BUILD_TYPE=clblas` now stops
+  with an error that points to `vulkan`. `CLBLAST_DIR` and the no-op
+  `LLAMA_OPENBLAS` make variable are gone too.
 
 ### Fixed
 

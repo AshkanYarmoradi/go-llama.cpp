@@ -1,14 +1,16 @@
 ---
 name: 'GPU tests'
 
-# This job needs a self-hosted CUDA runner. When none is attached, an
-# unconditional `pull_request` trigger leaves a queued check on every PR that
-# sits there until GitHub cancels it 24 hours later — which is what had been
-# happening on every PR since August.
+# Runs the `gpu`-labelled specs on a real NVIDIA GPU. That needs a self-hosted
+# Linux runner with an NVIDIA driver, Docker and the NVIDIA Container Toolkit;
+# the CUDA toolkit itself comes from the job's container, the same image
+# build-gpu.yaml compiles with on GPU-less hosted runners.
 #
-# So it is opt-in: run it by hand from the Actions tab, or put the `gpu` label
-# on a PR that needs it. Pushes to main and tags still run it, and the job
-# times out rather than parking a runner for a day.
+# When no such runner is attached, a queued job waits until GitHub cancels it
+# 24 hours later: timeout-minutes only starts counting once a runner picks the
+# job up. So it is opt-in. Run it by hand from the Actions tab, or put the
+# `gpu` label on a PR that needs it. Pushes to main and tags run it only once
+# the repository variable GPU_RUNNER is set to `true`.
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
@@ -27,53 +29,73 @@ permissions:
   contents: read
 
 jobs:
-  ubuntu-latest:
-    # On a PR, only when explicitly labelled `gpu`.
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'gpu')
+  ubuntu-cuda:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'gpu')) ||
+      (github.event_name == 'push' && vars.GPU_RUNNER == 'true')
     runs-on: self-hosted
-    timeout-minutes: 90
-    strategy:
-      matrix:
-        go-version: ['1.26.x']
+    timeout-minutes: 120
+    container:
+      image: nvidia/cuda:12.6.2-devel-ubuntu24.04
+      # Has the NVIDIA runtime inject the host's driver: the real libcuda.so.1
+      # and nvidia-smi.
+      options: --gpus all
+    defaults:
+      run:
+        # bash -eo pipefail, so a failing `make test` fails the step even
+        # though its output is piped through tee.
+        shell: bash
+    env:
+      DEBIAN_FRONTEND: noninteractive
     steps:
+      # git has to exist before checkout, or actions/checkout falls back to
+      # the REST API, which cannot fetch the llama.cpp submodule. wget fetches
+      # the test model.
+      - name: Dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential cmake git ca-certificates wget
+
       - name: Clone
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: 
+        with:
           submodules: true
-      - name: Setup Go ${{ matrix.go-version }}
+
+      # The container runs as root over a workspace the runner user created,
+      # and without this go build's VCS stamping fails on git's "dubious
+      # ownership" check.
+      - name: Trust the workspace
+        run: git config --global --add safe.directory '*'
+
+      - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ matrix.go-version }}
-      # You can test your matrix by printing the current Go version
-      - name: Display Go version
-        run: go version
-      - name: Dependencies
-        run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y make wget
-      - name: Dependencies
-        run: |
-          # This fixes libc6-dev installations errors on containers...
-          sudo rm -rfv /run/systemd/system
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ffmpeg nvidia-cuda-toolkit cmake
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates cmake curl patch
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y pip wget
+          go-version-file: go.mod
+
+      - name: GPU is visible
+        run: nvidia-smi
+
+      # GGML_NATIVE (on by default) compiles for the GPU this runner has.
+      #
+      # The two greps make sure the specs ran on the GPU rather than quietly
+      # on the CPU. ggml_cuda_init logs the CUDA devices it found
+      # (ggml-cuda.cu), and load_tensors logs how many layers went to a GPU
+      # (src/llama-model.cpp). The gpu spec asks for SetGPULayers(10), so that
+      # count must be non-zero; specs that load with 0 layers still log the
+      # line, as "offloaded 0/33".
       - name: Build and test
         run: |
-          GPU_TESTS=true BUILD_TYPE=cublas CMAKE_ARGS="-DLLAMA_METAL=OFF -DLLAMA_F16C=OFF -DLLAMA_AVX512=OFF -DLLAMA_AVX2=OFF -DLLAMA_FMA=OFF" \
-          make test 2>&1 | tee test_log.log
-          if grep -q "using CUDA for GPU acceleration" test_log.log; then
-            echo "All good";
-          else
-            echo "No CUDA found";
-            exit 1;
-          fi
+          make GPU_TESTS=true BUILD_TYPE=cublas test 2>&1 | tee test_log.log
+          grep -Eq 'ggml_cuda_init: found [1-9][0-9]* CUDA devices' test_log.log \
+            || { echo '::error::the CUDA backend found no GPU'; exit 1; }
+          grep -Eq 'load_tensors: offloaded [1-9][0-9]*/[0-9]+ layers to GPU' test_log.log \
+            || { echo '::error::no layers were offloaded to the GPU'; exit 1; }
+
+      # The build is written as root into the runner's own workspace, so it
+      # is removed from inside the container.
       - name: Release space from worker ♻
         if: always()
         run: |
-          sudo rm -rf build || true
-          sudo rm -rf bin || true
-          sudo rm -rf dist || true
-          sudo rm -rf *.log || true
+          rm -rf ./*.log || true
           make clean || true

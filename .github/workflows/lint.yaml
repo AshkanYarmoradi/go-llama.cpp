@@ -48,9 +48,16 @@ jobs:
           fi
 
       # go vet type-checks the cgo layer against binding.h without needing
-      # libbinding.a, so it catches signature drift between Go and C.
+      # libbinding.a, so it catches signature drift between Go and C. Each
+      # backend build tag adds a llama_<tag>.go file with its own cgo flags,
+      # which only that tag compiles, so vet runs once per tag.
       - name: go vet
-        run: go vet ./...
+        run: |
+          for tags in "" cublas hipblas vulkan openblas blis; do
+            echo "::group::go vet -tags '$tags'"
+            go vet -tags "$tags" ./...
+            echo "::endgroup::"
+          done
 
       - name: go mod tidy is up to date
         run: |
