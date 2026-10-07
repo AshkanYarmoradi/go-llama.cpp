@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -37,10 +38,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The context has to hold the prompt plus everything we generate. Do not
-	// enable embeddings here: an embeddings context returns pooled vectors
-	// instead of token logits, which turns generation into garbage. Load the
-	// model a second time with llama.EnableEmbeddings if you need both.
+	// The context has to hold the prompt plus everything we generate. Leave
+	// embeddings off: an embeddings context computes an output for every
+	// prompt token rather than only the last, which costs memory and time
+	// that generation has no use for.
 	l, err := llama.New(model,
 		llama.SetContext(contextSize),
 		llama.SetGPULayers(gpulayers),
@@ -51,6 +52,10 @@ func main() {
 	}
 	defer l.Free()
 
+	// Apply -t to the context, for generation and prompt processing alike.
+	// Without this the context runs on llama.cpp's default of 4 threads.
+	l.SetThreads(threads, threads)
+
 	fmt.Printf("Model loaded successfully.\n")
 
 	reader := bufio.NewReader(os.Stdin)
@@ -58,16 +63,36 @@ func main() {
 	for {
 		text := readMultiLineInput(reader)
 
-		_, err := l.Predict(text, llama.Debug, llama.SetTokenCallback(func(token string) bool {
+		prompt, err := chatPrompt(l, text)
+		if err != nil {
+			fmt.Printf("Applying the chat template failed: %s\n", err)
+			os.Exit(1)
+		}
+
+		_, err = l.Predict(prompt, llama.Debug, llama.SetTokenCallback(func(token string) bool {
 			fmt.Print(token)
 			return true
-		}), llama.SetTokens(tokens), llama.SetThreads(threads), llama.SetTopK(40), llama.SetTopP(0.9), llama.SetTemperature(0.7), llama.SetSeed(seed))
+		}), llama.SetTokens(tokens), llama.SetTopK(40), llama.SetTopP(0.9), llama.SetTemperature(0.7), llama.SetSeed(seed))
 		if err != nil {
 			fmt.Printf("Predicting failed: %s\n", err)
 			os.Exit(1)
 		}
 		fmt.Printf("\n\n")
 	}
+}
+
+// chatPrompt wraps one user message in the model's own chat template, so an
+// instruct model sees the turn markers it was trained on. A model without a
+// template llama.cpp can apply gets the text as typed.
+//
+// Each message is answered on its own: Predict clears the KV cache before it
+// runs, so nothing carries over from the previous turn.
+func chatPrompt(l *llama.LLama, text string) (string, error) {
+	prompt, err := l.ApplyChatTemplate("", []llama.ChatMessage{{Role: "user", Content: text}}, true)
+	if errors.Is(err, llama.ErrNoChatTemplate) {
+		return text, nil
+	}
+	return prompt, err
 }
 
 // readMultiLineInput reads input until an empty line is entered.
@@ -92,7 +117,5 @@ func readMultiLineInput(reader *bufio.Reader) string {
 		lines = append(lines, line)
 	}
 
-	text := strings.Join(lines, "")
-	fmt.Println("Sending", text)
-	return text
+	return strings.TrimRight(strings.Join(lines, ""), "\r\n")
 }
