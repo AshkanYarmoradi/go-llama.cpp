@@ -57,11 +57,12 @@ body:
       label: Build type
       options:
         - CPU (default)
-        - cublas (NVIDIA)
-        - hipblas (AMD)
+        - cublas (NVIDIA CUDA)
+        - hipblas (AMD ROCm)
+        - vulkan (Vulkan)
         - metal (Apple)
-        - clblas (OpenCL)
         - openblas
+        - blis
     validations:
       required: true
 

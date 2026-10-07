@@ -1,0 +1,172 @@
+name: GPU builds
+
+# Compile-and-link checks for the GPU build types, on GPU-less hosted runners.
+# Nothing here runs a model: there is no GPU and no driver. These jobs check
+# the three things that rotted unnoticed while the only GPU job needed
+# hardware it never had: that the Makefile passes CMake options llama.cpp
+# still reads, that the backend's objects end up in libbinding.a, and that
+# the build tag's cgo link flags resolve them in a real Go link.
+#
+# Running the `gpu`-labelled specs on a GPU is test-gpu.yaml's job.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - '*'
+  workflow_dispatch:
+
+# A CUDA build is the slowest job in the repo, so a superseded run is
+# cancelled rather than finished.
+concurrency:
+  group: build-gpu-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-cuda-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    container:
+      # The image upstream llama.cpp compiles ggml-cuda with on its own
+      # GPU-less CI (llama.cpp/.github/workflows/build-cuda-ubuntu.yml): nvcc,
+      # cudart, cuBLAS, and the driver stub libcuda.so in lib64/stubs.
+      image: nvidia/cuda:12.6.2-devel-ubuntu24.04
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      # With no GPU to probe, GGML_NATIVE's "native" CUDA arch cannot work.
+      # One real arch is one code-generation pass per kernel. 89 is what
+      # upstream's CI compiles, and being Ampere or newer it builds the
+      # tensor-core paths too.
+      CMAKE_ARGS: -DCMAKE_CUDA_ARCHITECTURES=89-real
+    steps:
+      # git has to exist before checkout, or actions/checkout falls back to
+      # the REST API, which cannot fetch the llama.cpp submodule.
+      - name: Dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential cmake git ca-certificates
+
+      - name: Clone
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+
+      # The container runs as root over a workspace the runner user created,
+      # and without this go build's VCS stamping fails on git's "dubious
+      # ownership" check.
+      - name: Trust the workspace
+        run: git config --global --add safe.directory '*'
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Toolchain versions
+        run: |
+          nvcc --version
+          cmake --version
+          gcc --version
+          go version
+
+      - name: Build libbinding.a with CUDA
+        run: make BUILD_TYPE=cublas libbinding.a
+
+      # The first check fails if the CUDA backend was silently left out, which
+      # is what an ignored CMake option does. The second fails if the object
+      # sweep picked up anything with a main(), such as CMake's nvcc
+      # compiler-identification leftovers.
+      - name: The archive holds the CUDA backend and nothing else
+        run: |
+          ar t libbinding.a > members.txt
+          grep -E '_ggml-cuda\.cu\.o$' members.txt \
+            || { echo '::error::libbinding.a has no ggml-cuda objects'; exit 1; }
+          nm -A --defined-only libbinding.a > symbols.txt 2>/dev/null || true
+          [ -s symbols.txt ] || { echo "::error::nm listed no symbols in libbinding.a"; exit 1; }
+          if grep -E ' T main$' symbols.txt; then
+            echo '::error::libbinding.a contains an object that defines main()'
+            exit 1
+          fi
+
+      # Forces the final external link, exactly as a user's
+      # `go build -tags cublas` does. In a container job the github.workspace
+      # context is the host's path, so this uses $PWD.
+      - name: Link the test binary and the example
+        run: |
+          export LIBRARY_PATH="$PWD" C_INCLUDE_PATH="$PWD"
+          go test -tags cublas -c -o llama-cuda.test .
+          go build -tags cublas -o llama-cuda-example ./examples
+
+      # Fails if a library was dropped from the link. libcublasLt is not
+      # checked: it is libcublas's own dependency, and --as-needed may omit it.
+      - name: The binaries depend on the CUDA libraries
+        run: |
+          for bin in llama-cuda.test llama-cuda-example; do
+            readelf -d "$bin" | grep NEEDED > needed.txt
+            cat needed.txt
+            for lib in libcudart.so libcublas.so libcuda.so; do
+              grep -qF "[$lib" needed.txt \
+                || { echo "::error::$bin does not link $lib"; exit 1; }
+            done
+          done
+
+  ubuntu-vulkan-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Clone
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+
+      # What llama.cpp's docs/build.md lists for Debian/Ubuntu: the Vulkan
+      # headers and loader, the GLSL compiler the shaders are built with, and
+      # SPIRV-Headers.
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libvulkan-dev glslc spirv-headers
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build libbinding.a with Vulkan
+        run: make BUILD_TYPE=vulkan libbinding.a
+
+      # The Vulkan build compiles a host tool, vulkan-shaders-gen, with its
+      # own main(). The Makefile's object sweep has to leave it out.
+      - name: The archive holds the Vulkan backend and nothing else
+        run: |
+          ar t libbinding.a > members.txt
+          grep -E '_ggml-vulkan\.cpp\.o$' members.txt \
+            || { echo '::error::libbinding.a has no ggml-vulkan objects'; exit 1; }
+          nm -A --defined-only libbinding.a > symbols.txt 2>/dev/null || true
+          [ -s symbols.txt ] || { echo "::error::nm listed no symbols in libbinding.a"; exit 1; }
+          if grep -E ' T main$' symbols.txt; then
+            echo '::error::libbinding.a contains an object that defines main()'
+            exit 1
+          fi
+
+      - name: Link the test binary and the example
+        run: |
+          export LIBRARY_PATH="$PWD" C_INCLUDE_PATH="$PWD"
+          go test -tags vulkan -c -o llama-vulkan.test .
+          go build -tags vulkan -o llama-vulkan-example ./examples
+
+      - name: The binaries depend on the Vulkan loader
+        run: |
+          for bin in llama-vulkan.test llama-vulkan-example; do
+            readelf -d "$bin" | grep NEEDED > needed.txt
+            cat needed.txt
+            grep -qF '[libvulkan.so' needed.txt \
+              || { echo "::error::$bin does not link libvulkan.so"; exit 1; }
+          done
