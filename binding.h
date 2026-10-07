@@ -349,7 +349,9 @@ void context_synchronize(void* state_ptr);
 // Further KV-cache operations. memory_seq_add shifts, and memory_seq_div
 // divides, the positions of a sequence in [p0, p1); negative p0/p1 mean "from
 // the start" / "to the end". The pos accessors return -1 for an empty sequence,
-// and for a seq_id outside [0, n_seq_max), which the others ignore.
+// and for a seq_id outside [0, n_seq_max), which the others ignore. memory_seq_add
+// and memory_seq_div also do nothing on a cache that cannot shift
+// (memory_can_shift false).
 void memory_seq_add(void* state_ptr, int seq_id, int p0, int p1, int delta);
 void memory_seq_div(void* state_ptr, int seq_id, int p0, int p1, int d);
 int memory_seq_pos_min(void* state_ptr, int seq_id);

@@ -487,8 +487,9 @@ func (l *LLama) MemorySeqKeep(seqID int32) {
 
 // MemorySeqAdd shifts the positions of tokens in [p0, p1) of sequence seqID by
 // delta. Pass p0 < 0 to start at 0 and p1 < 0 to run to the end. This is how a
-// context is "slid" forward after evicting a prefix; check MemoryCanShift first,
-// since not every cache type supports it.
+// context is "slid" forward after evicting a prefix. It does nothing when
+// MemoryCanShift reports false (M-RoPE models such as Qwen2-VL and Qwen3.5,
+// whose cache would otherwise abort the process), so check that first.
 func (l *LLama) MemorySeqAdd(seqID, p0, p1, delta int32) {
 	C.memory_seq_add(l.state, C.int(seqID), C.int(p0), C.int(p1), C.int(delta))
 }
@@ -497,7 +498,7 @@ func (l *LLama) MemorySeqAdd(seqID, p0, p1, delta int32) {
 // seqID by d (which must be > 1) — the position-interpolation trick for
 // stretching a context beyond its trained length. It is a no-op for d <= 1,
 // which also keeps d == 0 from reaching an integer division by zero in the
-// engine (a process-killing SIGFPE).
+// engine (a process-killing SIGFPE), and when MemoryCanShift reports false.
 func (l *LLama) MemorySeqDiv(seqID, p0, p1 int32, d int) {
 	if d <= 1 {
 		return
@@ -520,7 +521,8 @@ func (l *LLama) MemorySeqPosMax(seqID int32) int32 {
 }
 
 // MemoryCanShift reports whether the context's KV cache supports position
-// shifting via MemorySeqAdd.
+// shifting via MemorySeqAdd and MemorySeqDiv. Both do nothing when it is false,
+// and Predict then stops at a full context instead of shifting.
 func (l *LLama) MemoryCanShift() bool {
 	return bool(C.memory_can_shift(l.state))
 }
@@ -2305,7 +2307,10 @@ func (l *LLama) embeddingCap() int {
 // false. The prompt is decoded in chunks of at most ContextParams().NBatch
 // tokens, whatever SetBatch asks for. The result is truncated to 8 bytes per
 // SetTokens token plus the prompt length and 1 KiB, and never more than 4 MiB;
-// stream longer output with SetTokenCallback.
+// stream longer output with SetTokenCallback. When the context fills up, the
+// oldest half of the tokens after SetNKeep is discarded and generation goes
+// on; a model whose cache cannot shift (MemoryCanShift is false, as on M-RoPE
+// models such as Qwen2-VL and Qwen3.5) stops there and returns what it has.
 //
 // A failure is always reported as "inference failed", with the details
 // written to stderr or to the SetLogHandler handler. Causes include a prompt

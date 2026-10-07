@@ -716,6 +716,16 @@ static int llama_predict_impl(binding_params* params_p, void* state_pr, char* re
             // Context is full: discard the oldest half of the tokens after
             // n_keep and move the rest down, so the cache has free cells again.
             if (n_past + (int) embd.size() > n_ctx) {
+                // Not every cache can move positions: M-RoPE models (Qwen2-VL,
+                // Qwen3-VL, Qwen3.5) assert inside llama_memory_seq_add. A
+                // full context ends the generation there instead, as
+                // llama.cpp's own CLI does.
+                if (!llama_memory_can_shift(mem)) {
+                    fprintf(stderr, "%s: context is full (n_ctx = %d) and this model's cache cannot shift; stopping\n",
+                            __func__, n_ctx);
+                    break;
+                }
+
                 const int n_discard = (n_past - n_keep) / 2;
 
                 if (n_discard <= 0 || n_keep + (int) embd.size() > n_ctx) {
@@ -1737,7 +1747,9 @@ void context_synchronize(void* state_ptr) {
 
 void memory_seq_add(void* state_ptr, int seq_id, int p0, int p1, int delta) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
-    if (!seq_in_range(state->ctx, seq_id)) {
+    // A cache that cannot shift either asserts in seq_add (M-RoPE models) or
+    // aborts at the next decode's K-shift (Step-3.5).
+    if (!seq_in_range(state->ctx, seq_id) || !llama_memory_can_shift(llama_get_memory(state->ctx))) {
         return;
     }
     llama_memory_seq_add(llama_get_memory(state->ctx), seq_id, p0, p1, delta);
@@ -1745,7 +1757,8 @@ void memory_seq_add(void* state_ptr, int seq_id, int p0, int p1, int delta) {
 
 void memory_seq_div(void* state_ptr, int seq_id, int p0, int p1, int d) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
-    if (!seq_in_range(state->ctx, seq_id)) {
+    // As in memory_seq_add: seq_div asserts on a cache that cannot shift.
+    if (!seq_in_range(state->ctx, seq_id) || !llama_memory_can_shift(llama_get_memory(state->ctx))) {
         return;
     }
     llama_memory_seq_div(llama_get_memory(state->ctx), seq_id, p0, p1, d);

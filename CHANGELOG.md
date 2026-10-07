@@ -191,6 +191,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `Encode` beyond `NUbatch`. `Predict` sent its prompt in chunks of `SetBatch`
   (512 by default) whatever the context accepted, so a prompt longer than a
   smaller `NBatch` aborted; the chunks are now capped at `NBatch`.
+- **A full context aborted the process on models whose cache cannot shift**
+  (`MemoryCanShift` false), such as the M-RoPE models Qwen2-VL, Qwen3-VL and
+  Qwen3.5; Step-3.5 aborted one decode later, and DeepSeek-V4 produced wrong
+  output instead. `Predict` shifted the KV cache without checking
+  `llama_memory_can_shift`, and llama.cpp asserts in `seq_add` on those
+  caches; `MemorySeqAdd` and `MemorySeqDiv` reached the same assertion.
+  `Predict` now stops at a full context on such a model and returns what it
+  generated, as llama.cpp's CLI does, and both methods do nothing when
+  `MemoryCanShift` is false. The CI model can shift, so no spec reaches the
+  new path.
 - **DRY never ran unless `SetDRYPenaltyLastN` was given a positive window.**
   The default window, -1, is documented as the context size, but since
   llama.cpp `a6aa6f545` (the change that also dropped `n_ctx_train`, see the
