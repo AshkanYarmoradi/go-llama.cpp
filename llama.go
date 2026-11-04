@@ -2054,10 +2054,10 @@ const (
 	// SeqStateAll captures the whole sequence. This is what
 	// SequenceStateData uses.
 	SeqStateAll SeqStateFlags = 0
-	// SeqStatePartialOnly captures only the part of the cache the model
-	// still attends to. For a sliding-window model that is far smaller
-	// than the full sequence and is enough to resume from the current
-	// position, but it cannot reconstruct earlier context.
+	// SeqStatePartialOnly captures sliding-window and recurrent state,
+	// omitting ordinary KV-cache cells. It cannot restore a full context
+	// after MemoryClear; use SeqStateAll for that. It also cannot
+	// reconstruct context the model's sliding window has already passed.
 	SeqStatePartialOnly SeqStateFlags = 1
 	// SeqStateOnDevice keeps the state in device memory instead of
 	// copying it to host memory. The bytes SequenceStateDataWith returns
@@ -2085,8 +2085,10 @@ func (l *LLama) SequenceStateSizeWith(seqID int32, flags SeqStateFlags) int64 {
 // SequenceStateDataWith serializes a sequence, capturing only the part the
 // flags select. SeqStatePartialOnly on a sliding-window model produces a much
 // smaller checkpoint than SequenceStateData, at the cost of not being able to
-// reconstruct context the model has already slid past. A sequence id the
-// context does not hold returns an error, as in SequenceStateData.
+// reconstruct context the model has already slid past. Ordinary KV-cache
+// cells are omitted; use SeqStateAll to restore a full context after clearing
+// it. A sequence id the context does not hold returns an error, as in
+// SequenceStateData.
 func (l *LLama) SequenceStateDataWith(seqID int32, flags SeqStateFlags) ([]byte, error) {
 	return stateBuf(func(buf []byte) int64 {
 		var p *C.uchar

@@ -31,10 +31,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     container:
-      # The image upstream llama.cpp compiles ggml-cuda with on its own
-      # GPU-less CI (llama.cpp/.github/workflows/build-cuda-ubuntu.yml): nvcc,
-      # cudart, cuBLAS, and the driver stub libcuda.so in lib64/stubs.
-      image: nvidia/cuda:12.6.2-devel-ubuntu24.04
+      # NVIDIA's development image includes nvcc, cudart, cuBLAS, and the
+      # driver stub libcuda.so in lib64/stubs for GPU-less compilation.
+      image: nvidia/cuda:13.4.3-devel-ubuntu24.04
     defaults:
       run:
         shell: bash

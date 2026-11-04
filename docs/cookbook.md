@@ -960,6 +960,8 @@ window the model still attends to, a much smaller checkpoint.
 - The token list must match the cache. Save every prompt and generated token, in order.
 - `SaveState` and `LoadState` are the older file pair: the same bytes as `StateData`, without the
   token list. Prefer session files, which carry the tokens.
+- `SeqStatePartialOnly` omits ordinary KV-cache cells. Use `SeqStateAll` or
+  `SequenceStateData` when the checkpoint must restore a full context after `MemoryClear`.
 - The per-sequence calls (`SequenceStateData`, `SequenceStateSize`, `SaveSequenceFile` and their
   `With` variants) take a sequence id in `[0, ContextParams().NSeqMax)`, or -1 for every
   sequence. Any other id reports size 0, returns an error, and writes no file.
