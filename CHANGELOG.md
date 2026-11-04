@@ -92,6 +92,15 @@ than numbered, so entries are not yet grouped by release. Each one below is on
 
 ### Changed
 
+- Updated llama.cpp to `6f1e6543704bc5b080c7a98e7b6f707b31f6ed51`
+  (2026-11-04), Ginkgo to 2.34.0, and the indirect Go dependencies.
+  The minimum Go version remains 1.26. Upstream now omits ordinary KV-cache
+  cells from `SeqStatePartialOnly` snapshots; use `SeqStateAll` when restoring
+  a full context after clearing it. Pooled embedding contexts no longer
+  produce logits; disable embeddings before generating or sampling.
+- CUDA CI builds and GPU tests now use CUDA 13.4.3 on Ubuntu 24.04.
+  Self-hosted GPU runners need a Turing-or-newer GPU and a CUDA 13-compatible
+  driver (R580 or newer; CUDA 13.4 features may require R615).
 - **Breaking:** `SamplerPenalties` is now a method on `*LLama` rather than a
   package function. Upstream `935cad649`, which arrived with the submodule
   bump to llama.cpp v0.3.0, added a required `n_vocab` parameter to
