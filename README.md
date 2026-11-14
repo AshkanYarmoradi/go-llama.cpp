@@ -65,7 +65,7 @@ To run it you need the compiled engine and a model file. The next section gets y
 | Requirement | |
 |---|---|
 | Go | 1.26 or newer |
-| C++ compiler | GCC, Clang or Apple Clang, with C++17 |
+| C++ compiler | GCC on Linux; Clang or Apple Clang on macOS, with C++17 |
 | CMake | 3.14 or newer; the CUDA, ROCm and Vulkan builds need a newer one |
 | OS | Linux or macOS. Windows is not supported; WSL2 will probably work but is not tested. |
 | Linux only | the OpenMP runtime (libgomp, which comes with GCC) |

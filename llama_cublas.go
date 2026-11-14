@@ -5,8 +5,8 @@ package llama
 // Link flags for a libbinding.a built with `make BUILD_TYPE=cublas`.
 //
 // libbinding.a is repacked from CMake's objects, so ggml-cuda's link
-// dependencies are restated here, where they land after llama.go's -lbinding:
-//   - cudart and cublas are ggml-cuda's own link line; cublasLt is cublas's.
+// dependencies are restated here, where they land after llama.go's libbinding.a:
+//   - cudart, cublas and cublasLt are ggml-cuda's own link dependencies.
 //   - cuda is the driver API (cuDeviceGet, cuMemCreate, ...), which ggml-cuda
 //     calls unless llama.cpp is built with GGML_CUDA_NO_VMM=ON. lib64/stubs
 //     lets the link succeed where no driver is installed, as in CI; the real

@@ -44,7 +44,7 @@ How the Makefile handles them:
 
 - The tag compiles `llama_<tag>.go`, which holds the backend's link flags.
   Keep them there, not in `CGO_LDFLAGS`: cmd/go places `CGO_LDFLAGS` before
-  the package's `-lbinding`, where a linker that uses `--as-needed` drops the
+  the package's `libbinding.a`, where a linker that uses `--as-needed` drops the
   libraries.
 - `build/.build_type` records the `BUILD_TYPE` the build was configured with,
   and a different one wipes `build/` and rebuilds llama.cpp from scratch.

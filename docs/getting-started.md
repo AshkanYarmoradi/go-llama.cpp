@@ -519,7 +519,7 @@ ENTRYPOINT ["/usr/local/bin/app"]
 
 For NVIDIA GPUs, the same layout works with a CUDA base image:
 
-- Build from `nvidia/cuda:12.6.2-devel-ubuntu24.04`, and install `build-essential`, CMake, git and
+- Build from `nvidia/cuda:13.5.0-devel-ubuntu24.04`, and install `build-essential`, CMake, git and
   Go 1.26 or newer in it.
 - `docker build` cannot see a GPU, so name the GPU architectures to compile for:
   `CMAKE_ARGS="-DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES=<arch>" make BUILD_TYPE=cublas libbinding.a`.
@@ -528,8 +528,11 @@ For NVIDIA GPUs, the same layout works with a CUDA base image:
 - Each CUDA compile job can take a few GB of memory. If the build is killed, lower the job count
   with `make JOBS=2 ...`.
 - Build the program with `go build -tags cublas`.
-- Run on `nvidia/cuda:12.6.2-runtime-ubuntu24.04` with `libgomp1` added, and start the container
+- Run on `nvidia/cuda:13.5.0-runtime-ubuntu24.04` with `libgomp1` added, and start the container
   with `docker run --gpus all`.
+- The host needs a Turing-or-newer GPU, the NVIDIA Container Toolkit, and a driver supported by
+  the CUDA 13.5 image. New CUDA 13.5 features require R620 or newer; see
+  [NVIDIA's driver compatibility notes](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html#cuda-driver).
 
 CI's `ubuntu-cuda-build` job compiles and links a CUDA build inside that devel image on every pull
 request, naming the architecture through `CMAKE_ARGS` the same way. Nothing in CI builds this
@@ -541,7 +544,7 @@ layout as a Docker image, uses the runtime image, or runs it on a GPU.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `cannot find -lbinding` | `libbinding.a` was not built, or the `replace` path does not lead to the checkout you built. | Run `make libbinding.a` in the checkout. `go list -m -f '{{.Dir}}' github.com/AshkanYarmoradi/go-llama.cpp` prints the directory Go uses. |
+| The linker cannot find `/path/to/checkout/libbinding.a` | `libbinding.a` was not built, or the `replace` path does not lead to the checkout you built. | Run `make libbinding.a` in the checkout. `go list -m -f '{{.Dir}}' github.com/AshkanYarmoradi/go-llama.cpp` prints the directory Go uses. |
 | `llama.cpp/` is empty, or CMake says the source directory does not contain `CMakeLists.txt` | The clone missed the submodule. | `git submodule update --init`, then `make libbinding.a`. |
 | `requires go >= 1.26.0 (running go 1.2x; GOTOOLCHAIN=local)` | Your Go is older and automatic toolchain downloads are off (`GOTOOLCHAIN=local`). | Install Go 1.26 or newer, or allow `GOTOOLCHAIN=auto`. |
 | `failed loading model "..."` | Wrong path; not a GGUF file; an old GGML `.bin` or a GGUF version 1 file; a truncated download; or an architecture newer than the pinned llama.cpp. | Read the llama.cpp log just above the error. Download the file again, or pick a newer conversion. |
@@ -549,7 +552,7 @@ layout as a Docker image, uses the runtime image, or runs it on a GPU.
 | `Decode` returns -1 in your own loop | The batch holds more tokens than `ContextParams().NBatch`, a token id outside the vocabulary, or a sequence id the context does not hold. | Feed long prompts in several batches, or load with a larger `SetNBatch` and `SetContext`. Keep sequence ids below `ContextParams().NSeqMax`. |
 | `Sampler.Sample` returns -1 | The sampler is empty (for example a grammar that did not parse), or a grammar stage placed after a truncation or picking stage refused the token. The reason is on stderr. | Put grammar stages first in the chain, and check `chain.Len()` after adding one. |
 | The process exits with a `GGML_ASSERT` or `fatal error` message from llama.cpp while sampling | `Sampler.Sample` read an output that did not request logits, the chain has no stage that picks a token, or a misplaced grammar stage refused an end-of-generation token. | Pass `true` as the last argument of `Batch.Add` for the token you sample from. End the chain with `SamplerGreedy`, `SamplerDist` or `SamplerMirostatV2`, and put grammar stages first. |
-| `undefined reference to GOMP_...` when linking | llama.cpp and your program were built by compilers with different OpenMP runtimes. | Build both with the same `CC` and `CXX`; on Linux that is usually GCC. |
+| `undefined reference to GOMP_...` or `__kmpc_...` when linking | llama.cpp and your program were built with different OpenMP runtimes. | On Linux, rebuild with GCC (`CC=gcc CXX=g++`) and install `libgomp`. The binding explicitly links GNU OpenMP, not LLVM's `libomp`. |
 | `libgomp.so.1: cannot open shared object file` at start-up | The OpenMP runtime is missing on the machine that runs the binary. | Install it, for example `apt-get install libgomp1`. |
 | The reply is gibberish, repeats itself, or answers a different question | The prompt is not in the model's format, or the model is a base model. | Use `ApplyChatTemplate`, an instruct model, and a quantization of `Q4_K_M` or better. |
 | Generation is slow | With 0 GPU layers, generation runs on the CPU with 4 threads. | `SetGPULayers` on a GPU build, `model.SetThreads(n, n)`, a smaller model or quantization. Check with `Perf`. |
