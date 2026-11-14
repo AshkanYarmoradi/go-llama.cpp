@@ -197,7 +197,7 @@ The engine is about three years newer, and the build changed with it:
 | Go | 1.21 | 1.26 or newer |
 | C++ standard | C++11 | C++17 |
 | Build | CMake, then individual object files copied from `build/` into `llama.cpp/` and archived | `make libbinding.a` runs one CMake build into `./build` and archives it |
-| Extra link flags | Accelerate on macOS | Metal, MetalKit, Foundation and Accelerate on macOS; `-fopenmp` on Linux (libgomp ships with GCC) |
+| Extra link flags | Accelerate on macOS | Metal, MetalKit, Foundation and Accelerate on macOS; `-lgomp` on Linux (libgomp ships with GCC) |
 | Patches | `patches/1902-cuda.patch` | none |
 
 Build from a fresh clone, or run `make clean` first. The first build compiles

@@ -127,7 +127,7 @@ endif
 # GO_TAGS is the Go build tag whose llama_<tag>.go file holds the backend's
 # link flags. libbinding.a is repacked from CMake's objects, so CMake's own
 # link dependencies do not come with it; the tag file restates them, after
-# llama.go's -lbinding. Env CGO_LDFLAGS cannot do that job: cmd/go puts it
+# llama.go's libbinding.a. Env CGO_LDFLAGS cannot do that job: cmd/go puts it
 # before the package's flags, where an --as-needed linker drops the libraries.
 #
 # Switching BUILD_TYPE rebuilds llama.cpp from scratch (see build/.build_type).
@@ -165,7 +165,7 @@ ifeq ($(BUILD_TYPE),hipblas)
 	GPU_TARGETS ?= gfx900;gfx90a;gfx1030;gfx1031;gfx1100
 	# ROCm's clang compiles only the HIP sources, as llama.cpp's docs/build.md
 	# sets it up. C and C++ stay on the default toolchain, so ggml's OpenMP is
-	# the libgomp that llama.go's -fopenmp links. Needs ROCm 6.1 or newer.
+	# the libgomp that llama.go links. Needs ROCm 6.1 or newer.
 	override CMAKE_ENV+=HIPCXX="$(ROCM_HOME)/llvm/bin/clang" HIP_PATH="$(ROCM_HOME)" ROCM_PATH="$(ROCM_HOME)"
 	# CMake takes a ;-separated list. A comma-separated one still works.
 	comma := ,

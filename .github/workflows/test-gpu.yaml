@@ -2,9 +2,9 @@
 name: 'GPU tests'
 
 # Runs the `gpu`-labelled specs on a real NVIDIA GPU. That needs a self-hosted
-# Linux runner with a Turing-or-newer NVIDIA GPU, a CUDA 13-compatible driver
-# (R580 or newer), Docker and the NVIDIA Container Toolkit. CUDA 13.4 features
-# that need a newer driver require R615 or newer. The CUDA toolkit itself comes
+# Linux runner with a Turing-or-newer NVIDIA GPU, a driver supported by the
+# CUDA 13.5 container, Docker and the NVIDIA Container Toolkit. CUDA 13.5
+# features that need a newer driver require R620 or newer. The toolkit comes
 # from the job's container, the same image build-gpu.yaml compiles with on
 # GPU-less hosted runners.
 #
@@ -39,7 +39,7 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 120
     container:
-      image: nvidia/cuda:13.4.3-devel-ubuntu24.04
+      image: nvidia/cuda:13.5.0-devel-ubuntu24.04
       # Has the NVIDIA runtime inject the host's driver: the real libcuda.so.1
       # and nvidia-smi.
       options: --gpus all

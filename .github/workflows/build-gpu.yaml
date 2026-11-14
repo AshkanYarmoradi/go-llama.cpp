@@ -33,7 +33,7 @@ jobs:
     container:
       # NVIDIA's development image includes nvcc, cudart, cuBLAS, and the
       # driver stub libcuda.so in lib64/stubs for GPU-less compilation.
-      image: nvidia/cuda:13.4.3-devel-ubuntu24.04
+      image: nvidia/cuda:13.5.0-devel-ubuntu24.04
     defaults:
       run:
         shell: bash
@@ -103,14 +103,14 @@ jobs:
           go test -tags cublas -c -o llama-cuda.test .
           go build -tags cublas -o llama-cuda-example ./examples
 
-      # Fails if a library was dropped from the link. libcublasLt is not
-      # checked: it is libcublas's own dependency, and --as-needed may omit it.
+      # Fails if a library was dropped from the link. ggml-cuda directly uses
+      # cuBLASLt for FP8 operations and CUDA context teardown.
       - name: The binaries depend on the CUDA libraries
         run: |
           for bin in llama-cuda.test llama-cuda-example; do
             readelf -d "$bin" | grep NEEDED > needed.txt
             cat needed.txt
-            for lib in libcudart.so libcublas.so libcuda.so; do
+            for lib in libcudart.so libcublas.so libcublasLt.so libcuda.so; do
               grep -qF "[$lib" needed.txt \
                 || { echo "::error::$bin does not link $lib"; exit 1; }
             done

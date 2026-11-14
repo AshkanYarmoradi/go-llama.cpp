@@ -65,16 +65,23 @@ model. [Inside Predict](#inside-predict) has the details.
 These are the link directives at the top of `llama.go`:
 
 ```go
-// #cgo LDFLAGS: -L${SRCDIR}/ -lbinding -lm -lstdc++
-// #cgo linux LDFLAGS: -fopenmp
+// #cgo LDFLAGS: ${SRCDIR}/libbinding.a -lm -lstdc++
+// #cgo linux LDFLAGS: -lgomp
 // #cgo darwin LDFLAGS: -framework Accelerate -framework Foundation -framework Metal -framework MetalKit
 ```
 
 `libbinding.a` holds all of llama.cpp and ggml plus `binding.o`, and cgo links
-it statically from the package directory. Linux adds the OpenMP runtime. macOS
-adds the Accelerate, Foundation, Metal and MetalKit frameworks. A GPU or BLAS
+it statically from the package directory. Linux explicitly links GCC's GNU
+OpenMP runtime, `libgomp`. macOS adds the Accelerate, Foundation, Metal and
+MetalKit frameworks. A GPU or BLAS
 build adds its vendor libraries through a build-tagged Go file (see
 [GPU builds](#gpu-builds)). The binding never `dlopen`s llama.cpp.
+
+The archive is named directly so newer Go toolchains do not scan the entire
+checkout as a library search directory and reject unrelated upstream `.spec`
+files during cgo's safety checks. Passing `-fopenmp` to the linker also triggers
+that scan; `-lgomp` selects the runtime directly. Linux builds therefore use
+GCC and `libgomp`; LLVM's `libomp` is not selected automatically.
 
 What this gives you:
 
@@ -115,7 +122,7 @@ flowchart LR
     src["binding.cpp"] --> bo["binding.o"]
     objs --> ar["ar rcs libbinding.a"]
     bo --> ar
-    ar --> gob["go build -tags BACKEND<br/>cgo links -lbinding"]
+    ar --> gob["go build -tags BACKEND<br/>cgo links libbinding.a"]
     gob --> out["your binary<br/>plus the backend's vendor libraries, if any"]
 ```
 
@@ -312,11 +319,11 @@ process on one GPU, hide the others with the vendor's device mask, such as
 Older instructions passed the GPU libraries in `CGO_LDFLAGS`. That breaks on
 common Linux toolchains. `go build` puts `CGO_LDFLAGS` from the environment
 *before* the package's own `#cgo LDFLAGS`, so `-lcublas` lands in front of
-`-lbinding`. A linker that runs with `--as-needed`, as Ubuntu's GCC does by
+`libbinding.a`. A linker that runs with `--as-needed`, as Ubuntu's GCC does by
 default, drops a shared library that nothing has asked for yet. The
 `cuDeviceGet` and `cublas*` references inside `libbinding.a` then come out
 undefined. Flags in a tagged Go file such as `llama_cublas.go` are emitted
-after `-lbinding`, so the order is right.
+after `libbinding.a`, so the order is right.
 
 ### Why the old option names failed quietly
 
@@ -643,10 +650,10 @@ context.
 | `BUILD_TYPE=clblas was removed` | llama.cpp no longer has a CLBlast backend | `BUILD_TYPE=vulkan`, or `cublas` or `hipblas` |
 | CMake: `Could NOT find PkgConfig` with `openblas` or `blis` | `pkg-config` is not installed | install it, or pass `-DBLAS_INCLUDE_DIRS=<dir>` in `CMAKE_ARGS` |
 | CMake: `BLAS not found` | the OpenBLAS or BLIS library is not installed | install it (`libopenblas-dev` on Debian and Ubuntu) |
-| `cannot find -lbinding` | `libbinding.a` was not built, or the build ran elsewhere | `make libbinding.a` in the checkout your `replace` directive points at |
+| The linker cannot find `/path/to/checkout/libbinding.a` | `libbinding.a` was not built, or the build ran elsewhere | `make libbinding.a` in the checkout your `replace` directive points at |
 | `cannot find -lcublas` (or `-lcudart`, `-lhipblas`, ...) | the toolkit is not under `/usr/local/cuda` or `/opt/rocm` | add its library directory with `CGO_LDFLAGS="-L/path/to/lib"` |
 | `undefined reference to cuDeviceGet` or `cublas...` | a CUDA `libbinding.a` linked without the tag | build with `-tags cublas`; do not pass the libraries in `CGO_LDFLAGS` |
-| `undefined reference to GOMP_...` or `omp_...` | the linker cannot find the OpenMP runtime llama.cpp was compiled against | install GCC's OpenMP runtime (part of `build-essential` on Ubuntu), and use the same compiler for `make` and `go build` |
+| `undefined reference to GOMP_...`, `omp_...`, or `__kmpc_...` | the OpenMP runtime is missing or differs from GNU OpenMP | on Linux, install `libgomp` (part of `build-essential` on Ubuntu) and rebuild with GCC (`CC=gcc CXX=g++`) |
 | `LLAMA_CUBLAS is deprecated, use GGML_CUDA instead` | an old option name in `CMAKE_ARGS` or an old Makefile | use `BUILD_TYPE=cublas` from a current checkout, and `GGML_*` names in `CMAKE_ARGS` |
 | CMake: "Manually-specified variables were not used" | an option llama.cpp does not know, usually an old `LLAMA_*` name | rename it; the option did nothing |
 | A GPU build runs on the CPU | `SetGPULayers` left at 0, or the `libbinding.a` you linked was built without the GPU `BUILD_TYPE` (the Go tag alone adds only link flags) | pass `SetGPULayers`; rebuild with `make BUILD_TYPE=...`, then read the load log as in [Checking that the GPU is used](#checking-that-the-gpu-is-used) |

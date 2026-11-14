@@ -92,6 +92,19 @@ than numbered, so entries are not yet grouped by release. Each one below is on
 
 ### Changed
 
+- Link `libbinding.a` by its full path and link Linux's GNU OpenMP runtime
+  with `-lgomp`. Go 1.26.11 and 1.27.4 scan linker search directories and
+  `-fopenmp` package directories for `.spec` files, rejecting llama.cpp's
+  unrelated RPM packaging files. The archive location and build commands
+  stay the same.
+- Updated llama.cpp to `32bdc3a89e6528d3e419024c833c5dabf32c7541`
+  (2026-11-14), in the 1.0 series. The binding uses none of the deprecated
+  APIs removed upstream. Updated pprof, `x/mod`, `x/sync`, `x/sys`, and
+  `x/text`; the minimum Go version remains 1.26.
+- CUDA CI builds and GPU tests now use CUDA 13.5.0 on Ubuntu 24.04.
+  Self-hosted runners need a driver supported by that container image;
+  new CUDA 13.5 features require R620 or newer. The link check now verifies
+  cuBLASLt, which the updated engine calls directly.
 - Updated llama.cpp to `6f1e6543704bc5b080c7a98e7b6f707b31f6ed51`
   (2026-11-04), Ginkgo to 2.34.0, and the indirect Go dependencies.
   The minimum Go version remains 1.26. Upstream now omits ordinary KV-cache
