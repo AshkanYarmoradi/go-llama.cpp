@@ -303,6 +303,8 @@ gofmt -l -e .
 for t in "" cublas hipblas vulkan openblas blis; do go vet -tags "$t" ./...; done
 go mod tidy && git diff --exit-code go.mod go.sum
 ./scripts/check-binding-symbols.sh
+go test ./scripts/api-review
+go run ./scripts/api-review           # required: upstream API changes need review
 ./scripts/engine-coverage.sh --check   # CI only warns when this is stale
 ```
 
@@ -319,6 +321,51 @@ c++ -I./llama.cpp -I./llama.cpp/include -I./llama.cpp/ggml/include \
 `check-binding-symbols.sh` exists because cgo compiles `binding.h` into the
 package: a function declared there but never defined type-checks fine and only
 fails at link time, twenty minutes into a full CI run.
+
+## Reviewing llama.cpp API changes
+
+Lint's existing `Go` job fails when `llama.cpp/include/llama.h` differs from
+`scripts/api-review/reviewed.json`. This applies to Dependabot and every other
+PR. It tracks exported function signatures, complete structs/unions (including
+fields and callbacks), complete enums (including order and implicit values),
+opaque types and typedefs. Comments and whitespace do not need review.
+
+The initial baseline preserves the existing API and its known coverage gaps;
+it does not claim that every API or field is exposed in Go. Existing deliberate
+function exclusions have reasons copied from the coverage report. The gate
+does not scan ggml, common, server or multimodal headers, preprocessor macro
+values, default values in implementations, or runtime behaviour. Keep the
+coverage report and model tests as separate checks.
+
+When the check fails:
+
+1. Read its added/changed/removed declarations and the upstream diff.
+2. Adapt `binding.cpp`, `binding.h`, `llama.go` and `options.go` as needed,
+   with tests for any new Go behaviour. Or decide explicitly to defer/exclude
+   an API and explain why. Fields and enum members are reviewed with their
+   containing struct or enum, so new members of an excluded type still fail.
+3. Record each decision, using the exact item name from the failure:
+
+   ```bash
+   go run ./scripts/api-review -review 'struct llama_model_params' \
+     -decision supported -reason 'New option exposed through its Go ModelOption; tested in llama_test.go.'
+   go run ./scripts/api-review -review 'function llama_opt_init' \
+     -decision excluded -reason 'Training remains outside this inference binding.'
+   ```
+
+   Use `deferred` with a reason for a planned API. Use `removed` after reviewing
+   an upstream removal and handling its callers. Every decision requires a
+   reason; exclusions only approve the exact declaration reviewed. There is no
+   bulk approval command. `-list` prints the current declarations without
+   changing approvals.
+4. Run `go run ./scripts/api-review` again, refresh the coverage report when
+   needed, and commit the manifest with the code and tests. Reviewers should
+   check the recorded reasons alongside the implementation; this check records
+   review decisions, it cannot prove that their claims are correct.
+
+Do not update the baseline just to make a dependency PR green. Keep the Lint
+`Go` check required in the repository's merge rules if merges must be blocked;
+the workflow itself cannot prevent an administrator bypassing a failed check.
 
 ## When llama.cpp breaks the build
 

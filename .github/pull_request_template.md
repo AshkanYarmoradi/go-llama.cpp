@@ -35,6 +35,7 @@ Delete this section if there are none.
 - [ ] `go vet` passes under every build tag (the loop in CONTRIBUTING.md)
 - [ ] `go mod tidy && git diff --exit-code go.mod go.sum` shows no changes
 - [ ] `./scripts/check-binding-symbols.sh` passes
+- [ ] `go test ./scripts/api-review` and `go run ./scripts/api-review` pass; changed upstream declarations have individual review decisions and reasons
 - [ ] `binding.cpp` compiles with the CI warning flags (see CONTRIBUTING.md)
 - [ ] Tested against a real model with `TEST_MODEL` set, or explained below why not
 - [ ] New tests live in their own `Context` block, above the `gpu`-labelled one

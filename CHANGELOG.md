@@ -14,6 +14,11 @@ than numbered, so entries are not yet grouped by release. Each one below is on
 
 ### Added
 
+- **Required upstream API review.** Lint now fails on unreviewed public
+  llama.cpp functions, struct fields, enums and typedefs. Exact declarations
+  and decisions are recorded in `scripts/api-review/reviewed.json`;
+  intentional exclusions and deferrals require a reason. The initial baseline
+  preserves the existing API and its documented coverage gaps.
 - **Chat template application.** `ApplyChatTemplate` renders a `[]ChatMessage`
   into a prompt using the model's own GGUF template, or a named one from
   `BuiltinChatTemplates()`. Returns `ErrNoChatTemplate` when llama.cpp cannot
