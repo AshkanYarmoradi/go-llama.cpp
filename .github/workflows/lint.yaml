@@ -35,6 +35,12 @@ jobs:
           go-version: stable
           cache: true
 
+      - name: Test API review check
+        run: go test ./scripts/api-review
+
+      - name: llama.cpp API changes are reviewed
+        run: go run ./scripts/api-review
+
       # Scoped to this repo's own sources: the llama.cpp submodule is not ours
       # to format.
       - name: gofmt
@@ -89,7 +95,7 @@ jobs:
 
       # docs/engine-coverage.md is generated from llama.h and binding.cpp, so a
       # llama.cpp bump or a new wrapper can leave it behind. That is a warning,
-      # never a failure: a Dependabot bump must not be blocked by a doc.
+      # never a failure. The Go job separately requires an API review.
       - name: Engine coverage page is current
         run: |
           status=0

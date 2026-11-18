@@ -1,0 +1,1180 @@
+{
+  "baseline": "Existing public llama.h API at the start of the review gate. Baseline entries preserve the current binding's scope, including the pending gaps documented in docs/engine-coverage.md; they do not claim full Go coverage. Future additions, changes and removals require an individual supported, deferred, excluded or removed decision with a reason.",
+  "api": {
+    "enum llama_attention_type": {
+      "declaration": "enum llama_attention_type { LLAMA_ATTENTION_TYPE_UNSPECIFIED = - 1 , LLAMA_ATTENTION_TYPE_CAUSAL = 0 , LLAMA_ATTENTION_TYPE_NON_CAUSAL = 1 , } ;",
+      "decision": "baseline"
+    },
+    "enum llama_context_type": {
+      "declaration": "enum llama_context_type { LLAMA_CONTEXT_TYPE_DEFAULT = 0 , LLAMA_CONTEXT_TYPE_MTP = 1 , } ;",
+      "decision": "baseline"
+    },
+    "enum llama_dflash_variant": {
+      "declaration": "enum llama_dflash_variant { LLAMA_DFLASH_VARIANT_NONE = - 1 , LLAMA_DFLASH_VARIANT_DFLASH = 0 , LLAMA_DFLASH_VARIANT_DFLASH2 = 1 , LLAMA_DFLASH_VARIANT_DSPARK = 2 , LLAMA_DFLASH_VARIANT_LILICORR = 3 , } ;",
+      "decision": "baseline"
+    },
+    "enum llama_flash_attn_type": {
+      "declaration": "enum llama_flash_attn_type { LLAMA_FLASH_ATTN_TYPE_AUTO = - 1 , LLAMA_FLASH_ATTN_TYPE_DISABLED = 0 , LLAMA_FLASH_ATTN_TYPE_ENABLED = 1 , } ;",
+      "decision": "baseline"
+    },
+    "enum llama_ftype": {
+      "declaration": "enum llama_ftype { LLAMA_FTYPE_ALL_F32 = 0 , LLAMA_FTYPE_MOSTLY_F16 = 1 , LLAMA_FTYPE_MOSTLY_Q4_0 = 2 , LLAMA_FTYPE_MOSTLY_Q4_1 = 3 , LLAMA_FTYPE_MOSTLY_Q8_0 = 7 , LLAMA_FTYPE_MOSTLY_Q5_0 = 8 , LLAMA_FTYPE_MOSTLY_Q5_1 = 9 , LLAMA_FTYPE_MOSTLY_Q2_K = 10 , LLAMA_FTYPE_MOSTLY_Q3_K_S = 11 , LLAMA_FTYPE_MOSTLY_Q3_K_M = 12 , LLAMA_FTYPE_MOSTLY_Q3_K_L = 13 , LLAMA_FTYPE_MOSTLY_Q4_K_S = 14 , LLAMA_FTYPE_MOSTLY_Q4_K_M = 15 , LLAMA_FTYPE_MOSTLY_Q5_K_S = 16 , LLAMA_FTYPE_MOSTLY_Q5_K_M = 17 , LLAMA_FTYPE_MOSTLY_Q6_K = 18 , LLAMA_FTYPE_MOSTLY_IQ2_XXS = 19 , LLAMA_FTYPE_MOSTLY_IQ2_XS = 20 , LLAMA_FTYPE_MOSTLY_Q2_K_S = 21 , LLAMA_FTYPE_MOSTLY_IQ3_XS = 22 , LLAMA_FTYPE_MOSTLY_IQ3_XXS = 23 , LLAMA_FTYPE_MOSTLY_IQ1_S = 24 , LLAMA_FTYPE_MOSTLY_IQ4_NL = 25 , LLAMA_FTYPE_MOSTLY_IQ3_S = 26 , LLAMA_FTYPE_MOSTLY_IQ3_M = 27 , LLAMA_FTYPE_MOSTLY_IQ2_S = 28 , LLAMA_FTYPE_MOSTLY_IQ2_M = 29 , LLAMA_FTYPE_MOSTLY_IQ4_XS = 30 , LLAMA_FTYPE_MOSTLY_IQ1_M = 31 , LLAMA_FTYPE_MOSTLY_BF16 = 32 , LLAMA_FTYPE_MOSTLY_TQ1_0 = 36 , LLAMA_FTYPE_MOSTLY_TQ2_0 = 37 , LLAMA_FTYPE_MOSTLY_MXFP4_MOE = 38 , LLAMA_FTYPE_MOSTLY_NVFP4 = 39 , LLAMA_FTYPE_MOSTLY_Q1_0 = 40 , LLAMA_FTYPE_MOSTLY_Q2_0 = 41 , LLAMA_FTYPE_MOSTLY_F8_E4M3 = 42 , LLAMA_FTYPE_GUESSED = 1024 , } ;",
+      "decision": "baseline"
+    },
+    "enum llama_lazy_mode": {
+      "declaration": "enum llama_lazy_mode { LLAMA_LAZY_MODE_OFF = 0 , LLAMA_LAZY_MODE_AUTO = 1 , LLAMA_LAZY_MODE_ON = 2 , } ;",
+      "decision": "baseline"
+    },
+    "enum llama_load_mode": {
+      "declaration": "enum llama_load_mode { LLAMA_LOAD_MODE_AUTO = - 1 , LLAMA_LOAD_MODE_NONE = 0 , LLAMA_LOAD_MODE_MMAP = 1 , LLAMA_LOAD_MODE_MLOCK = 2 , LLAMA_LOAD_MODE_MMAP_MLOCK = 3 , LLAMA_LOAD_MODE_DIRECT_IO = 4 , } ;",
+      "decision": "baseline"
+    },
+    "enum llama_model_kv_override_type": {
+      "declaration": "enum llama_model_kv_override_type { LLAMA_KV_OVERRIDE_TYPE_INT , LLAMA_KV_OVERRIDE_TYPE_FLOAT , LLAMA_KV_OVERRIDE_TYPE_BOOL , LLAMA_KV_OVERRIDE_TYPE_STR , } ;",
+      "decision": "baseline"
+    },
+    "enum llama_model_meta_key": {
+      "declaration": "enum llama_model_meta_key { LLAMA_MODEL_META_KEY_SAMPLING_SEQUENCE , LLAMA_MODEL_META_KEY_SAMPLING_TOP_K , LLAMA_MODEL_META_KEY_SAMPLING_TOP_P , LLAMA_MODEL_META_KEY_SAMPLING_MIN_P , LLAMA_MODEL_META_KEY_SAMPLING_XTC_PROBABILITY , LLAMA_MODEL_META_KEY_SAMPLING_XTC_THRESHOLD , LLAMA_MODEL_META_KEY_SAMPLING_TEMP , LLAMA_MODEL_META_KEY_SAMPLING_PENALTY_LAST_N , LLAMA_MODEL_META_KEY_SAMPLING_PENALTY_REPEAT , LLAMA_MODEL_META_KEY_SAMPLING_MIROSTAT , LLAMA_MODEL_META_KEY_SAMPLING_MIROSTAT_TAU , LLAMA_MODEL_META_KEY_SAMPLING_MIROSTAT_ETA , } ;",
+      "decision": "baseline"
+    },
+    "enum llama_pooling_type": {
+      "declaration": "enum llama_pooling_type { LLAMA_POOLING_TYPE_UNSPECIFIED = - 1 , LLAMA_POOLING_TYPE_NONE = 0 , LLAMA_POOLING_TYPE_MEAN = 1 , LLAMA_POOLING_TYPE_CLS = 2 , LLAMA_POOLING_TYPE_LAST = 3 , LLAMA_POOLING_TYPE_RANK = 4 , } ;",
+      "decision": "baseline"
+    },
+    "enum llama_process_type": {
+      "declaration": "enum llama_process_type { LLAMA_PROCESS_TYPE_ENCODE , LLAMA_PROCESS_TYPE_DECODE , } ;",
+      "decision": "baseline"
+    },
+    "enum llama_rope_scaling_type": {
+      "declaration": "enum llama_rope_scaling_type { LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED = - 1 , LLAMA_ROPE_SCALING_TYPE_NONE = 0 , LLAMA_ROPE_SCALING_TYPE_LINEAR = 1 , LLAMA_ROPE_SCALING_TYPE_YARN = 2 , LLAMA_ROPE_SCALING_TYPE_LONGROPE = 3 , LLAMA_ROPE_SCALING_TYPE_MAX_VALUE = LLAMA_ROPE_SCALING_TYPE_LONGROPE , } ;",
+      "decision": "baseline"
+    },
+    "enum llama_rope_type": {
+      "declaration": "enum llama_rope_type { LLAMA_ROPE_TYPE_NONE = - 1 , LLAMA_ROPE_TYPE_NORM = 0 , LLAMA_ROPE_TYPE_NEOX = GGML_ROPE_TYPE_NEOX , LLAMA_ROPE_TYPE_MROPE = GGML_ROPE_TYPE_MROPE , LLAMA_ROPE_TYPE_IMROPE = GGML_ROPE_TYPE_IMROPE , LLAMA_ROPE_TYPE_VISION = GGML_ROPE_TYPE_VISION , } ;",
+      "decision": "baseline"
+    },
+    "enum llama_split_mode": {
+      "declaration": "enum llama_split_mode { LLAMA_SPLIT_MODE_NONE = 0 , LLAMA_SPLIT_MODE_LAYER = 1 , LLAMA_SPLIT_MODE_ROW = 2 , LLAMA_SPLIT_MODE_TENSOR = 3 , } ;",
+      "decision": "baseline"
+    },
+    "enum llama_token_attr": {
+      "declaration": "enum llama_token_attr { LLAMA_TOKEN_ATTR_UNDEFINED = 0 , LLAMA_TOKEN_ATTR_UNKNOWN = 1 < < 0 , LLAMA_TOKEN_ATTR_UNUSED = 1 < < 1 , LLAMA_TOKEN_ATTR_NORMAL = 1 < < 2 , LLAMA_TOKEN_ATTR_CONTROL = 1 < < 3 , LLAMA_TOKEN_ATTR_USER_DEFINED = 1 < < 4 , LLAMA_TOKEN_ATTR_BYTE = 1 < < 5 , LLAMA_TOKEN_ATTR_NORMALIZED = 1 < < 6 , LLAMA_TOKEN_ATTR_LSTRIP = 1 < < 7 , LLAMA_TOKEN_ATTR_RSTRIP = 1 < < 8 , LLAMA_TOKEN_ATTR_SINGLE_WORD = 1 < < 9 , } ;",
+      "decision": "baseline"
+    },
+    "enum llama_token_type": {
+      "declaration": "enum llama_token_type { LLAMA_TOKEN_TYPE_UNDEFINED = 0 , LLAMA_TOKEN_TYPE_NORMAL = 1 , LLAMA_TOKEN_TYPE_UNKNOWN = 2 , LLAMA_TOKEN_TYPE_CONTROL = 3 , LLAMA_TOKEN_TYPE_USER_DEFINED = 4 , LLAMA_TOKEN_TYPE_UNUSED = 5 , LLAMA_TOKEN_TYPE_BYTE = 6 , } ;",
+      "decision": "baseline"
+    },
+    "enum llama_vocab_type": {
+      "declaration": "enum llama_vocab_type { LLAMA_VOCAB_TYPE_NONE = 0 , LLAMA_VOCAB_TYPE_SPM = 1 , LLAMA_VOCAB_TYPE_BPE = 2 , LLAMA_VOCAB_TYPE_WPM = 3 , LLAMA_VOCAB_TYPE_UGM = 4 , LLAMA_VOCAB_TYPE_RWKV = 5 , LLAMA_VOCAB_TYPE_PLAMO2 = 6 , LLAMA_VOCAB_TYPE_TEST = 7 , LLAMA_VOCAB_TYPE_PLAMO3 = 8 , } ;",
+      "decision": "baseline"
+    },
+    "function llama_adapter_get_alora_invocation_tokens": {
+      "declaration": "LLAMA_API const llama_token * llama_adapter_get_alora_invocation_tokens ( const struct llama_adapter_lora * adapter ) ;",
+      "decision": "baseline"
+    },
+    "function llama_adapter_get_alora_n_invocation_tokens": {
+      "declaration": "LLAMA_API uint64_t llama_adapter_get_alora_n_invocation_tokens ( const struct llama_adapter_lora * adapter ) ;",
+      "decision": "baseline"
+    },
+    "function llama_adapter_lora_free": {
+      "declaration": "LLAMA_API void llama_adapter_lora_free ( struct llama_adapter_lora * adapter ) ;",
+      "decision": "baseline"
+    },
+    "function llama_adapter_lora_init": {
+      "declaration": "LLAMA_API struct llama_adapter_lora * llama_adapter_lora_init ( struct llama_model * model , const char * path_lora ) ;",
+      "decision": "baseline"
+    },
+    "function llama_adapter_lora_init_from_file_ptr": {
+      "declaration": "LLAMA_API struct llama_adapter_lora * llama_adapter_lora_init_from_file_ptr ( struct llama_model * model , FILE * file ) ;",
+      "decision": "excluded",
+      "reason": "Takes a C FILE pointer; ApplyLoRA exposes loading by path."
+    },
+    "function llama_adapter_meta_count": {
+      "declaration": "LLAMA_API int32_t llama_adapter_meta_count ( const struct llama_adapter_lora * adapter ) ;",
+      "decision": "baseline"
+    },
+    "function llama_adapter_meta_key_by_index": {
+      "declaration": "LLAMA_API int32_t llama_adapter_meta_key_by_index ( const struct llama_adapter_lora * adapter , int32_t i , char * buf , size_t buf_size ) ;",
+      "decision": "baseline"
+    },
+    "function llama_adapter_meta_val_str": {
+      "declaration": "LLAMA_API int32_t llama_adapter_meta_val_str ( const struct llama_adapter_lora * adapter , const char * key , char * buf , size_t buf_size ) ;",
+      "decision": "baseline"
+    },
+    "function llama_adapter_meta_val_str_by_index": {
+      "declaration": "LLAMA_API int32_t llama_adapter_meta_val_str_by_index ( const struct llama_adapter_lora * adapter , int32_t i , char * buf , size_t buf_size ) ;",
+      "decision": "baseline"
+    },
+    "function llama_attach_threadpool": {
+      "declaration": "LLAMA_API void llama_attach_threadpool ( struct llama_context * ctx , ggml_threadpool_t threadpool , ggml_threadpool_t threadpool_batch ) ;",
+      "decision": "excluded",
+      "reason": "Requires ggml threadpool objects; SetThreads already exposes thread counts."
+    },
+    "function llama_backend_free": {
+      "declaration": "LLAMA_API void llama_backend_free ( void ) ;",
+      "decision": "baseline"
+    },
+    "function llama_backend_init": {
+      "declaration": "LLAMA_API void llama_backend_init ( void ) ;",
+      "decision": "baseline"
+    },
+    "function llama_batch_ext_add": {
+      "declaration": "LLAMA_API int32_t llama_batch_ext_add ( struct llama_batch_ext * batch , llama_seq_id seq_id ) ;",
+      "decision": "baseline"
+    },
+    "function llama_batch_ext_add_embd": {
+      "declaration": "LLAMA_API int32_t llama_batch_ext_add_embd ( struct llama_batch_ext * batch , llama_seq_id seq_id , struct llama_embd embd ) ;",
+      "decision": "baseline"
+    },
+    "function llama_batch_ext_add_embd_row": {
+      "declaration": "LLAMA_API int32_t llama_batch_ext_add_embd_row ( struct llama_batch_ext * batch , llama_seq_id seq_id , int32_t row ) ;",
+      "decision": "baseline"
+    },
+    "function llama_batch_ext_add_seq": {
+      "declaration": "LLAMA_API bool llama_batch_ext_add_seq ( struct llama_batch_ext * batch , int32_t idx , llama_seq_id seq_id ) ;",
+      "decision": "baseline"
+    },
+    "function llama_batch_ext_add_token": {
+      "declaration": "LLAMA_API int32_t llama_batch_ext_add_token ( struct llama_batch_ext * batch , llama_seq_id seq_id , llama_token id ) ;",
+      "decision": "baseline"
+    },
+    "function llama_batch_ext_clear": {
+      "declaration": "LLAMA_API void llama_batch_ext_clear ( struct llama_batch_ext * batch ) ;",
+      "decision": "baseline"
+    },
+    "function llama_batch_ext_free": {
+      "declaration": "LLAMA_API void llama_batch_ext_free ( struct llama_batch_ext * batch ) ;",
+      "decision": "baseline"
+    },
+    "function llama_batch_ext_init": {
+      "declaration": "LLAMA_API struct llama_batch_ext * llama_batch_ext_init ( struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_batch_ext_set_embd_state": {
+      "declaration": "LLAMA_API bool llama_batch_ext_set_embd_state ( struct llama_batch_ext * batch , int32_t idx , struct llama_embd embd ) ;",
+      "decision": "baseline"
+    },
+    "function llama_batch_ext_set_embd_state_row": {
+      "declaration": "LLAMA_API bool llama_batch_ext_set_embd_state_row ( struct llama_batch_ext * batch , int32_t idx , int32_t row ) ;",
+      "decision": "baseline"
+    },
+    "function llama_batch_ext_set_embd_token": {
+      "declaration": "LLAMA_API bool llama_batch_ext_set_embd_token ( struct llama_batch_ext * batch , int32_t idx , struct llama_embd embd ) ;",
+      "decision": "baseline"
+    },
+    "function llama_batch_ext_set_output_embd": {
+      "declaration": "LLAMA_API bool llama_batch_ext_set_output_embd ( struct llama_batch_ext * batch , int32_t idx , bool value ) ;",
+      "decision": "baseline"
+    },
+    "function llama_batch_ext_set_output_logits": {
+      "declaration": "LLAMA_API bool llama_batch_ext_set_output_logits ( struct llama_batch_ext * batch , int32_t idx , bool value ) ;",
+      "decision": "baseline"
+    },
+    "function llama_batch_ext_set_pos": {
+      "declaration": "LLAMA_API bool llama_batch_ext_set_pos ( struct llama_batch_ext * batch , int32_t idx , const llama_pos * pos ) ;",
+      "decision": "baseline"
+    },
+    "function llama_batch_free": {
+      "declaration": "LLAMA_API void llama_batch_free ( struct llama_batch batch ) ;",
+      "decision": "baseline"
+    },
+    "function llama_batch_get_one": {
+      "declaration": "LLAMA_API struct llama_batch llama_batch_get_one ( llama_token * tokens , int32_t n_tokens ) ;",
+      "decision": "baseline"
+    },
+    "function llama_batch_init": {
+      "declaration": "LLAMA_API struct llama_batch llama_batch_init ( int32_t n_tokens , int32_t embd , int32_t n_seq_max ) ;",
+      "decision": "baseline"
+    },
+    "function llama_chat_apply_template": {
+      "declaration": "LLAMA_API int32_t llama_chat_apply_template ( const char * tmpl , const struct llama_chat_message * chat , size_t n_msg , bool add_ass , char * buf , int32_t length ) ;",
+      "decision": "baseline"
+    },
+    "function llama_chat_builtin_templates": {
+      "declaration": "LLAMA_API int32_t llama_chat_builtin_templates ( const char * * output , size_t len ) ;",
+      "decision": "baseline"
+    },
+    "function llama_context_default_params": {
+      "declaration": "LLAMA_API struct llama_context_params llama_context_default_params ( void ) ;",
+      "decision": "baseline"
+    },
+    "function llama_decode": {
+      "declaration": "LLAMA_API int32_t llama_decode ( struct llama_context * ctx , struct llama_batch batch ) ;",
+      "decision": "baseline"
+    },
+    "function llama_detach_threadpool": {
+      "declaration": "LLAMA_API void llama_detach_threadpool ( struct llama_context * ctx ) ;",
+      "decision": "excluded",
+      "reason": "Requires ggml threadpool objects; SetThreads already exposes thread counts."
+    },
+    "function llama_detokenize": {
+      "declaration": "LLAMA_API int32_t llama_detokenize ( const struct llama_vocab * vocab , const llama_token * tokens , int32_t n_tokens , char * text , int32_t text_len_max , bool remove_special , bool unparse_special ) ;",
+      "decision": "baseline"
+    },
+    "function llama_encode": {
+      "declaration": "LLAMA_API int32_t llama_encode ( struct llama_context * ctx , struct llama_batch batch ) ;",
+      "decision": "baseline"
+    },
+    "function llama_flash_attn_type_name": {
+      "declaration": "LLAMA_API const char * llama_flash_attn_type_name ( enum llama_flash_attn_type flash_attn_type ) ;",
+      "decision": "baseline"
+    },
+    "function llama_free": {
+      "declaration": "LLAMA_API void llama_free ( struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_ftype_name": {
+      "declaration": "LLAMA_API const char * llama_ftype_name ( enum llama_ftype ftype ) ;",
+      "decision": "baseline"
+    },
+    "function llama_get_causal_attn": {
+      "declaration": "LLAMA_API bool llama_get_causal_attn ( const struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_get_ctx_other": {
+      "declaration": "LLAMA_API struct llama_context * llama_get_ctx_other ( struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_get_embeddings": {
+      "declaration": "LLAMA_API float * llama_get_embeddings ( struct llama_context * ctx ) ;",
+      "decision": "excluded",
+      "reason": "TokenEmbedding(i) and SequenceEmbedding expose the preferred row accessors."
+    },
+    "function llama_get_embeddings_ith": {
+      "declaration": "LLAMA_API float * llama_get_embeddings_ith ( struct llama_context * ctx , int32_t i ) ;",
+      "decision": "baseline"
+    },
+    "function llama_get_embeddings_layer_inp": {
+      "declaration": "LLAMA_API float * llama_get_embeddings_layer_inp ( struct llama_context * ctx , uint32_t lid ) ;",
+      "decision": "baseline"
+    },
+    "function llama_get_embeddings_nextn": {
+      "declaration": "LLAMA_API float * llama_get_embeddings_nextn ( struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_get_embeddings_nextn_ith": {
+      "declaration": "LLAMA_API float * llama_get_embeddings_nextn_ith ( struct llama_context * ctx , int32_t i ) ;",
+      "decision": "baseline"
+    },
+    "function llama_get_embeddings_nextn_rows": {
+      "declaration": "LLAMA_API bool llama_get_embeddings_nextn_rows ( struct llama_context * ctx , int64_t row0 , int64_t n_rows , float * out ) ;",
+      "decision": "baseline"
+    },
+    "function llama_get_embeddings_seq": {
+      "declaration": "LLAMA_API float * llama_get_embeddings_seq ( struct llama_context * ctx , llama_seq_id seq_id ) ;",
+      "decision": "baseline"
+    },
+    "function llama_get_logits": {
+      "declaration": "LLAMA_API float * llama_get_logits ( struct llama_context * ctx ) ;",
+      "decision": "excluded",
+      "reason": "Logits(i) exposes the preferred llama_get_logits_ith API."
+    },
+    "function llama_get_logits_ith": {
+      "declaration": "LLAMA_API float * llama_get_logits_ith ( struct llama_context * ctx , int32_t i ) ;",
+      "decision": "baseline"
+    },
+    "function llama_get_memory": {
+      "declaration": "LLAMA_API llama_memory_t llama_get_memory ( const struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_get_model": {
+      "declaration": "LLAMA_API const struct llama_model * llama_get_model ( const struct llama_context * ctx ) ;",
+      "decision": "excluded",
+      "reason": "The binding already retains both model and context pointers."
+    },
+    "function llama_get_sampled_candidates_count_ith": {
+      "declaration": "LLAMA_API uint32_t llama_get_sampled_candidates_count_ith ( struct llama_context * ctx , int32_t i ) ;",
+      "decision": "baseline"
+    },
+    "function llama_get_sampled_candidates_ith": {
+      "declaration": "LLAMA_API llama_token * llama_get_sampled_candidates_ith ( struct llama_context * ctx , int32_t i ) ;",
+      "decision": "baseline"
+    },
+    "function llama_get_sampled_logits_count_ith": {
+      "declaration": "LLAMA_API uint32_t llama_get_sampled_logits_count_ith ( struct llama_context * ctx , int32_t i ) ;",
+      "decision": "baseline"
+    },
+    "function llama_get_sampled_logits_ith": {
+      "declaration": "LLAMA_API float * llama_get_sampled_logits_ith ( struct llama_context * ctx , int32_t i ) ;",
+      "decision": "baseline"
+    },
+    "function llama_get_sampled_probs_count_ith": {
+      "declaration": "LLAMA_API uint32_t llama_get_sampled_probs_count_ith ( struct llama_context * ctx , int32_t i ) ;",
+      "decision": "baseline"
+    },
+    "function llama_get_sampled_probs_ith": {
+      "declaration": "LLAMA_API float * llama_get_sampled_probs_ith ( struct llama_context * ctx , int32_t i ) ;",
+      "decision": "baseline"
+    },
+    "function llama_get_sampled_token_ith": {
+      "declaration": "LLAMA_API llama_token llama_get_sampled_token_ith ( struct llama_context * ctx , int32_t i ) ;",
+      "decision": "baseline"
+    },
+    "function llama_init_from_model": {
+      "declaration": "LLAMA_API struct llama_context * llama_init_from_model ( struct llama_model * model , struct llama_context_params params ) ;",
+      "decision": "baseline"
+    },
+    "function llama_load_mode_from_str": {
+      "declaration": "LLAMA_API enum llama_load_mode llama_load_mode_from_str ( const char * str ) ;",
+      "decision": "excluded",
+      "reason": "Aborts on unknown names; ParseLoadMode safely matches llama_load_mode_name instead."
+    },
+    "function llama_load_mode_name": {
+      "declaration": "LLAMA_API const char * llama_load_mode_name ( enum llama_load_mode load_mode ) ;",
+      "decision": "baseline"
+    },
+    "function llama_log_get": {
+      "declaration": "LLAMA_API void llama_log_get ( ggml_log_callback * log_callback , void * * user_data ) ;",
+      "decision": "baseline"
+    },
+    "function llama_log_set": {
+      "declaration": "LLAMA_API void llama_log_set ( ggml_log_callback log_callback , void * user_data ) ;",
+      "decision": "baseline"
+    },
+    "function llama_max_devices": {
+      "declaration": "LLAMA_API size_t llama_max_devices ( void ) ;",
+      "decision": "baseline"
+    },
+    "function llama_max_parallel_sequences": {
+      "declaration": "LLAMA_API size_t llama_max_parallel_sequences ( void ) ;",
+      "decision": "baseline"
+    },
+    "function llama_max_tensor_buft_overrides": {
+      "declaration": "LLAMA_API size_t llama_max_tensor_buft_overrides ( void ) ;",
+      "decision": "baseline"
+    },
+    "function llama_memory_can_shift": {
+      "declaration": "LLAMA_API bool llama_memory_can_shift ( llama_memory_t mem ) ;",
+      "decision": "baseline"
+    },
+    "function llama_memory_clear": {
+      "declaration": "LLAMA_API void llama_memory_clear ( llama_memory_t mem , bool data ) ;",
+      "decision": "baseline"
+    },
+    "function llama_memory_seq_add": {
+      "declaration": "LLAMA_API void llama_memory_seq_add ( llama_memory_t mem , llama_seq_id seq_id , llama_pos p0 , llama_pos p1 , llama_pos delta ) ;",
+      "decision": "baseline"
+    },
+    "function llama_memory_seq_cp": {
+      "declaration": "LLAMA_API void llama_memory_seq_cp ( llama_memory_t mem , llama_seq_id seq_id_src , llama_seq_id seq_id_dst , llama_pos p0 , llama_pos p1 ) ;",
+      "decision": "baseline"
+    },
+    "function llama_memory_seq_div": {
+      "declaration": "LLAMA_API void llama_memory_seq_div ( llama_memory_t mem , llama_seq_id seq_id , llama_pos p0 , llama_pos p1 , int d ) ;",
+      "decision": "baseline"
+    },
+    "function llama_memory_seq_keep": {
+      "declaration": "LLAMA_API void llama_memory_seq_keep ( llama_memory_t mem , llama_seq_id seq_id ) ;",
+      "decision": "baseline"
+    },
+    "function llama_memory_seq_pos_max": {
+      "declaration": "LLAMA_API llama_pos llama_memory_seq_pos_max ( llama_memory_t mem , llama_seq_id seq_id ) ;",
+      "decision": "baseline"
+    },
+    "function llama_memory_seq_pos_min": {
+      "declaration": "LLAMA_API llama_pos llama_memory_seq_pos_min ( llama_memory_t mem , llama_seq_id seq_id ) ;",
+      "decision": "baseline"
+    },
+    "function llama_memory_seq_rm": {
+      "declaration": "LLAMA_API bool llama_memory_seq_rm ( llama_memory_t mem , llama_seq_id seq_id , llama_pos p0 , llama_pos p1 ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_chat_template": {
+      "declaration": "LLAMA_API const char * llama_model_chat_template ( const struct llama_model * model , const char * name ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_cls_label": {
+      "declaration": "LLAMA_API const char * llama_model_cls_label ( const struct llama_model * model , uint32_t i ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_decoder_start_token": {
+      "declaration": "LLAMA_API llama_token llama_model_decoder_start_token ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_default_params": {
+      "declaration": "LLAMA_API struct llama_model_params llama_model_default_params ( void ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_desc": {
+      "declaration": "LLAMA_API int32_t llama_model_desc ( const struct llama_model * model , char * buf , size_t buf_size ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_dflash_selector_top_k": {
+      "declaration": "LLAMA_API int32_t llama_model_dflash_selector_top_k ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_dflash_variant": {
+      "declaration": "LLAMA_API enum llama_dflash_variant llama_model_dflash_variant ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_free": {
+      "declaration": "LLAMA_API void llama_model_free ( struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_ftype": {
+      "declaration": "LLAMA_API enum llama_ftype llama_model_ftype ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_get_vocab": {
+      "declaration": "LLAMA_API const struct llama_vocab * llama_model_get_vocab ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_has_decoder": {
+      "declaration": "LLAMA_API bool llama_model_has_decoder ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_has_encoder": {
+      "declaration": "LLAMA_API bool llama_model_has_encoder ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_init_from_user": {
+      "declaration": "LLAMA_API struct llama_model * llama_model_init_from_user ( struct gguf_context * metadata , llama_model_set_tensor_data_t set_tensor_data , void * set_tensor_data_ud , struct llama_model_params params ) ;",
+      "decision": "excluded",
+      "reason": "Requires ggml GGUF contexts and tensor-data callbacks; the binding loads models from files."
+    },
+    "function llama_model_is_diffusion": {
+      "declaration": "LLAMA_API bool llama_model_is_diffusion ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_is_hybrid": {
+      "declaration": "LLAMA_API bool llama_model_is_hybrid ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_is_recurrent": {
+      "declaration": "LLAMA_API bool llama_model_is_recurrent ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_load_from_file": {
+      "declaration": "LLAMA_API struct llama_model * llama_model_load_from_file ( const char * path_model , struct llama_model_params params ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_load_from_file_ptr": {
+      "declaration": "LLAMA_API struct llama_model * llama_model_load_from_file_ptr ( FILE * file , struct llama_model_params params ) ;",
+      "decision": "excluded",
+      "reason": "Takes a C FILE pointer; New and NewFromSplits expose loading by path."
+    },
+    "function llama_model_load_from_splits": {
+      "declaration": "LLAMA_API struct llama_model * llama_model_load_from_splits ( const char * * paths , size_t n_paths , struct llama_model_params params ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_meta_count": {
+      "declaration": "LLAMA_API int32_t llama_model_meta_count ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_meta_key_by_index": {
+      "declaration": "LLAMA_API int32_t llama_model_meta_key_by_index ( const struct llama_model * model , int32_t i , char * buf , size_t buf_size ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_meta_key_str": {
+      "declaration": "LLAMA_API const char * llama_model_meta_key_str ( enum llama_model_meta_key key ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_meta_val_str": {
+      "declaration": "LLAMA_API int32_t llama_model_meta_val_str ( const struct llama_model * model , const char * key , char * buf , size_t buf_size ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_meta_val_str_by_index": {
+      "declaration": "LLAMA_API int32_t llama_model_meta_val_str_by_index ( const struct llama_model * model , int32_t i , char * buf , size_t buf_size ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_n_cls_out": {
+      "declaration": "LLAMA_API uint32_t llama_model_n_cls_out ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_n_ctx_train": {
+      "declaration": "LLAMA_API int32_t llama_model_n_ctx_train ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_n_embd": {
+      "declaration": "LLAMA_API int32_t llama_model_n_embd ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_n_embd_inp": {
+      "declaration": "LLAMA_API int32_t llama_model_n_embd_inp ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_n_embd_out": {
+      "declaration": "LLAMA_API int32_t llama_model_n_embd_out ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_n_head": {
+      "declaration": "LLAMA_API int32_t llama_model_n_head ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_n_head_kv": {
+      "declaration": "LLAMA_API int32_t llama_model_n_head_kv ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_n_layer": {
+      "declaration": "LLAMA_API int32_t llama_model_n_layer ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_n_layer_nextn": {
+      "declaration": "LLAMA_API int32_t llama_model_n_layer_nextn ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_n_params": {
+      "declaration": "LLAMA_API uint64_t llama_model_n_params ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_n_swa": {
+      "declaration": "LLAMA_API int32_t llama_model_n_swa ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_quantize": {
+      "declaration": "LLAMA_API uint32_t llama_model_quantize ( const char * fname_inp , const char * fname_out , const llama_model_quantize_params * params ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_quantize_default_params": {
+      "declaration": "LLAMA_API struct llama_model_quantize_params llama_model_quantize_default_params ( void ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_rope_freq_scale_train": {
+      "declaration": "LLAMA_API float llama_model_rope_freq_scale_train ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_rope_type": {
+      "declaration": "LLAMA_API enum llama_rope_type llama_model_rope_type ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_save_to_file": {
+      "declaration": "LLAMA_API void llama_model_save_to_file ( const struct llama_model * model , const char * path_model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_size": {
+      "declaration": "LLAMA_API uint64_t llama_model_size ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_target_layer_ids": {
+      "declaration": "LLAMA_API const int32_t * llama_model_target_layer_ids ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_model_target_layer_ids_n": {
+      "declaration": "LLAMA_API uint32_t llama_model_target_layer_ids_n ( const struct llama_model * model ) ;",
+      "decision": "baseline"
+    },
+    "function llama_n_batch": {
+      "declaration": "LLAMA_API uint32_t llama_n_batch ( const struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_n_ctx": {
+      "declaration": "LLAMA_API uint32_t llama_n_ctx ( const struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_n_ctx_seq": {
+      "declaration": "LLAMA_API uint32_t llama_n_ctx_seq ( const struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_n_rs_seq": {
+      "declaration": "LLAMA_API uint32_t llama_n_rs_seq ( const struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_n_seq_max": {
+      "declaration": "LLAMA_API uint32_t llama_n_seq_max ( const struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_n_threads": {
+      "declaration": "LLAMA_API int32_t llama_n_threads ( struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_n_threads_batch": {
+      "declaration": "LLAMA_API int32_t llama_n_threads_batch ( struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_n_ubatch": {
+      "declaration": "LLAMA_API uint32_t llama_n_ubatch ( const struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_numa_init": {
+      "declaration": "LLAMA_API void llama_numa_init ( enum ggml_numa_strategy numa ) ;",
+      "decision": "baseline"
+    },
+    "function llama_opt_epoch": {
+      "declaration": "LLAMA_API void llama_opt_epoch ( struct llama_context * lctx , ggml_opt_dataset_t dataset , ggml_opt_result_t result_train , ggml_opt_result_t result_eval , int64_t idata_split , ggml_opt_epoch_callback callback_train , ggml_opt_epoch_callback callback_eval ) ;",
+      "decision": "excluded",
+      "reason": "Training is outside the scope of this inference binding and requires ggml optimizer types."
+    },
+    "function llama_opt_init": {
+      "declaration": "LLAMA_API void llama_opt_init ( struct llama_context * lctx , struct llama_model * model , struct llama_opt_params lopt_params ) ;",
+      "decision": "excluded",
+      "reason": "Training is outside the scope of this inference binding and requires ggml optimizer types."
+    },
+    "function llama_opt_param_filter_all": {
+      "declaration": "LLAMA_API bool llama_opt_param_filter_all ( const struct ggml_tensor * tensor , void * userdata ) ;",
+      "decision": "excluded",
+      "reason": "Training is outside the scope of this inference binding and requires ggml optimizer types."
+    },
+    "function llama_perf_context": {
+      "declaration": "LLAMA_API struct llama_perf_context_data llama_perf_context ( const struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_perf_context_print": {
+      "declaration": "LLAMA_API void llama_perf_context_print ( const struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_perf_context_reset": {
+      "declaration": "LLAMA_API void llama_perf_context_reset ( struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_perf_sampler": {
+      "declaration": "LLAMA_API struct llama_perf_sampler_data llama_perf_sampler ( const struct llama_sampler * chain ) ;",
+      "decision": "baseline"
+    },
+    "function llama_perf_sampler_print": {
+      "declaration": "LLAMA_API void llama_perf_sampler_print ( const struct llama_sampler * chain ) ;",
+      "decision": "excluded",
+      "reason": "Sampler.Perf returns the data without forcing log output."
+    },
+    "function llama_perf_sampler_reset": {
+      "declaration": "LLAMA_API void llama_perf_sampler_reset ( struct llama_sampler * chain ) ;",
+      "decision": "baseline"
+    },
+    "function llama_pooling_type": {
+      "declaration": "LLAMA_API enum llama_pooling_type llama_pooling_type ( const struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_print_system_info": {
+      "declaration": "LLAMA_API const char * llama_print_system_info ( void ) ;",
+      "decision": "baseline"
+    },
+    "function llama_process": {
+      "declaration": "LLAMA_API int32_t llama_process ( struct llama_context * ctx , enum llama_process_type type , struct llama_batch_ext * batch ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_accept": {
+      "declaration": "LLAMA_API void llama_sampler_accept ( struct llama_sampler * smpl , llama_token token ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_apply": {
+      "declaration": "LLAMA_API void llama_sampler_apply ( struct llama_sampler * smpl , llama_token_data_array * cur_p ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_chain_add": {
+      "declaration": "LLAMA_API void llama_sampler_chain_add ( struct llama_sampler * chain , struct llama_sampler * smpl ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_chain_default_params": {
+      "declaration": "LLAMA_API struct llama_sampler_chain_params llama_sampler_chain_default_params ( void ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_chain_get": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_chain_get ( struct llama_sampler * chain , int32_t i ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_chain_init": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_chain_init ( struct llama_sampler_chain_params params ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_chain_n": {
+      "declaration": "LLAMA_API int32_t llama_sampler_chain_n ( const struct llama_sampler * chain ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_chain_remove": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_chain_remove ( struct llama_sampler * chain , int32_t i ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_clone": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_clone ( const struct llama_sampler * smpl ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_copy": {
+      "declaration": "LLAMA_API void llama_sampler_copy ( const struct llama_sampler * src , struct llama_sampler * dst ) ;",
+      "decision": "excluded",
+      "reason": "Requires a caller-allocated custom sampler; Sampler.Clone covers the supported use case."
+    },
+    "function llama_sampler_free": {
+      "declaration": "LLAMA_API void llama_sampler_free ( struct llama_sampler * smpl ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_get_seed": {
+      "declaration": "LLAMA_API uint32_t llama_sampler_get_seed ( const struct llama_sampler * smpl ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init ( struct llama_sampler_i * iface , llama_sampler_context_t ctx ) ;",
+      "decision": "excluded",
+      "reason": "Requires a C function-pointer vtable for a custom sampler; built-in stages have Go constructors."
+    },
+    "function llama_sampler_init_adaptive_p": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_adaptive_p ( float target , float decay , uint32_t seed ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init_dist": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_dist ( uint32_t seed ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init_dry": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_dry ( const struct llama_vocab * vocab , float dry_multiplier , float dry_base , int32_t dry_allowed_length , int32_t dry_penalty_last_n , const char * * seq_breakers , size_t num_breakers ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init_grammar": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_grammar ( const struct llama_vocab * vocab , const char * grammar_str , const char * grammar_root ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init_grammar_lazy_patterns": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_grammar_lazy_patterns ( const struct llama_vocab * vocab , const char * grammar_str , const char * grammar_root , const char * * trigger_patterns , size_t num_trigger_patterns , const llama_token * trigger_tokens , size_t num_trigger_tokens ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init_greedy": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_greedy ( void ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init_infill": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_infill ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init_logit_bias": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_logit_bias ( int32_t n_vocab , int32_t n_logit_bias , const llama_logit_bias * logit_bias ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init_min_p": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_min_p ( float p , size_t min_keep ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init_mirostat": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_mirostat ( int32_t n_vocab , uint32_t seed , float tau , float eta , int32_t m ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init_mirostat_v2": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_mirostat_v2 ( uint32_t seed , float tau , float eta ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init_penalties": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_penalties ( int32_t n_vocab , int32_t penalty_last_n , float penalty_repeat , float penalty_freq , float penalty_present ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init_temp": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_temp ( float t ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init_temp_ext": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_temp_ext ( float t , float delta , float exponent ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init_top_k": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_top_k ( int32_t k ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init_top_n_sigma": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_top_n_sigma ( float n ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init_top_p": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_top_p ( float p , size_t min_keep ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init_typical": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_typical ( float p , size_t min_keep ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_init_xtc": {
+      "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_xtc ( float p , float t , size_t min_keep , uint32_t seed ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_name": {
+      "declaration": "LLAMA_API const char * llama_sampler_name ( const struct llama_sampler * smpl ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_reset": {
+      "declaration": "LLAMA_API void llama_sampler_reset ( struct llama_sampler * smpl ) ;",
+      "decision": "baseline"
+    },
+    "function llama_sampler_sample": {
+      "declaration": "LLAMA_API llama_token llama_sampler_sample ( struct llama_sampler * smpl , struct llama_context * ctx , int32_t idx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_set_abort_callback": {
+      "declaration": "LLAMA_API void llama_set_abort_callback ( struct llama_context * ctx , ggml_abort_callback abort_callback , void * abort_callback_data ) ;",
+      "decision": "baseline"
+    },
+    "function llama_set_adapter_cvec": {
+      "declaration": "LLAMA_API int32_t llama_set_adapter_cvec ( struct llama_context * ctx , const float * data , size_t len , int32_t n_embd , int32_t il_start , int32_t il_end ) ;",
+      "decision": "baseline"
+    },
+    "function llama_set_adapters_lora": {
+      "declaration": "LLAMA_API int32_t llama_set_adapters_lora ( struct llama_context * ctx , struct llama_adapter_lora * * adapters , size_t n_adapters , float * scales ) ;",
+      "decision": "baseline"
+    },
+    "function llama_set_causal_attn": {
+      "declaration": "LLAMA_API void llama_set_causal_attn ( struct llama_context * ctx , bool causal_attn ) ;",
+      "decision": "baseline"
+    },
+    "function llama_set_ctx_state_src": {
+      "declaration": "LLAMA_API bool llama_set_ctx_state_src ( struct llama_context * ctx , struct llama_context * ctx_src ) ;",
+      "decision": "baseline"
+    },
+    "function llama_set_embeddings": {
+      "declaration": "LLAMA_API void llama_set_embeddings ( struct llama_context * ctx , bool embeddings ) ;",
+      "decision": "baseline"
+    },
+    "function llama_set_embeddings_layer_inp": {
+      "declaration": "LLAMA_API void llama_set_embeddings_layer_inp ( struct llama_context * ctx , uint32_t lid , bool value ) ;",
+      "decision": "baseline"
+    },
+    "function llama_set_embeddings_layer_inp_dev": {
+      "declaration": "LLAMA_API void llama_set_embeddings_layer_inp_dev ( struct llama_context * ctx , bool value ) ;",
+      "decision": "baseline"
+    },
+    "function llama_set_embeddings_nextn": {
+      "declaration": "LLAMA_API void llama_set_embeddings_nextn ( struct llama_context * ctx , bool value , bool masked ) ;",
+      "decision": "baseline"
+    },
+    "function llama_set_embeddings_nextn_dev": {
+      "declaration": "LLAMA_API bool llama_set_embeddings_nextn_dev ( struct llama_context * ctx , bool value ) ;",
+      "decision": "baseline"
+    },
+    "function llama_set_embeddings_nextn_rows": {
+      "declaration": "LLAMA_API bool llama_set_embeddings_nextn_rows ( struct llama_context * ctx , int64_t row0 , int64_t n_rows , const float * data ) ;",
+      "decision": "baseline"
+    },
+    "function llama_set_n_threads": {
+      "declaration": "LLAMA_API void llama_set_n_threads ( struct llama_context * ctx , int32_t n_threads , int32_t n_threads_batch ) ;",
+      "decision": "baseline"
+    },
+    "function llama_set_nextn_layer_offset": {
+      "declaration": "LLAMA_API void llama_set_nextn_layer_offset ( struct llama_context * ctx , int32_t offset ) ;",
+      "decision": "baseline"
+    },
+    "function llama_set_sampler": {
+      "declaration": "LLAMA_API bool llama_set_sampler ( struct llama_context * ctx , llama_seq_id seq_id , struct llama_sampler * smpl ) ;",
+      "decision": "baseline"
+    },
+    "function llama_split_path": {
+      "declaration": "LLAMA_API int32_t llama_split_path ( char * split_path , size_t maxlen , const char * path_prefix , int32_t split_no , int32_t split_count ) ;",
+      "decision": "baseline"
+    },
+    "function llama_split_prefix": {
+      "declaration": "LLAMA_API int32_t llama_split_prefix ( char * split_prefix , size_t maxlen , const char * split_path , int32_t split_no , int32_t split_count ) ;",
+      "decision": "baseline"
+    },
+    "function llama_state_get_data": {
+      "declaration": "LLAMA_API size_t llama_state_get_data ( struct llama_context * ctx , uint8_t * dst , size_t size ) ;",
+      "decision": "baseline"
+    },
+    "function llama_state_get_size": {
+      "declaration": "LLAMA_API size_t llama_state_get_size ( struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_state_load_file": {
+      "declaration": "LLAMA_API bool llama_state_load_file ( struct llama_context * ctx , const char * path_session , llama_token * tokens_out , size_t n_token_capacity , size_t * n_token_count_out ) ;",
+      "decision": "baseline"
+    },
+    "function llama_state_save_file": {
+      "declaration": "LLAMA_API bool llama_state_save_file ( struct llama_context * ctx , const char * path_session , const llama_token * tokens , size_t n_token_count ) ;",
+      "decision": "baseline"
+    },
+    "function llama_state_seq_get_data": {
+      "declaration": "LLAMA_API size_t llama_state_seq_get_data ( struct llama_context * ctx , uint8_t * dst , size_t size , llama_seq_id seq_id ) ;",
+      "decision": "baseline"
+    },
+    "function llama_state_seq_get_data_ext": {
+      "declaration": "LLAMA_API size_t llama_state_seq_get_data_ext ( struct llama_context * ctx , uint8_t * dst , size_t size , llama_seq_id seq_id , llama_state_seq_flags flags ) ;",
+      "decision": "baseline"
+    },
+    "function llama_state_seq_get_size": {
+      "declaration": "LLAMA_API size_t llama_state_seq_get_size ( struct llama_context * ctx , llama_seq_id seq_id ) ;",
+      "decision": "baseline"
+    },
+    "function llama_state_seq_get_size_ext": {
+      "declaration": "LLAMA_API size_t llama_state_seq_get_size_ext ( struct llama_context * ctx , llama_seq_id seq_id , llama_state_seq_flags flags ) ;",
+      "decision": "baseline"
+    },
+    "function llama_state_seq_load_file": {
+      "declaration": "LLAMA_API size_t llama_state_seq_load_file ( struct llama_context * ctx , const char * filepath , llama_seq_id dest_seq_id , llama_token * tokens_out , size_t n_token_capacity , size_t * n_token_count_out ) ;",
+      "decision": "baseline"
+    },
+    "function llama_state_seq_save_file": {
+      "declaration": "LLAMA_API size_t llama_state_seq_save_file ( struct llama_context * ctx , const char * filepath , llama_seq_id seq_id , const llama_token * tokens , size_t n_token_count ) ;",
+      "decision": "baseline"
+    },
+    "function llama_state_seq_set_data": {
+      "declaration": "LLAMA_API size_t llama_state_seq_set_data ( struct llama_context * ctx , const uint8_t * src , size_t size , llama_seq_id dest_seq_id ) ;",
+      "decision": "baseline"
+    },
+    "function llama_state_seq_set_data_ext": {
+      "declaration": "LLAMA_API size_t llama_state_seq_set_data_ext ( struct llama_context * ctx , const uint8_t * src , size_t size , llama_seq_id dest_seq_id , llama_state_seq_flags flags ) ;",
+      "decision": "baseline"
+    },
+    "function llama_state_set_data": {
+      "declaration": "LLAMA_API size_t llama_state_set_data ( struct llama_context * ctx , const uint8_t * src , size_t size ) ;",
+      "decision": "baseline"
+    },
+    "function llama_supports_embd_row": {
+      "declaration": "LLAMA_API bool llama_supports_embd_row ( const struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_supports_gpu_offload": {
+      "declaration": "LLAMA_API bool llama_supports_gpu_offload ( void ) ;",
+      "decision": "baseline"
+    },
+    "function llama_supports_mlock": {
+      "declaration": "LLAMA_API bool llama_supports_mlock ( void ) ;",
+      "decision": "baseline"
+    },
+    "function llama_supports_mmap": {
+      "declaration": "LLAMA_API bool llama_supports_mmap ( void ) ;",
+      "decision": "baseline"
+    },
+    "function llama_supports_rpc": {
+      "declaration": "LLAMA_API bool llama_supports_rpc ( void ) ;",
+      "decision": "baseline"
+    },
+    "function llama_synchronize": {
+      "declaration": "LLAMA_API void llama_synchronize ( struct llama_context * ctx ) ;",
+      "decision": "baseline"
+    },
+    "function llama_time_us": {
+      "declaration": "LLAMA_API int64_t llama_time_us ( void ) ;",
+      "decision": "baseline"
+    },
+    "function llama_token_to_piece": {
+      "declaration": "LLAMA_API int32_t llama_token_to_piece ( const struct llama_vocab * vocab , llama_token token , char * buf , int32_t length , int32_t lstrip , bool special ) ;",
+      "decision": "baseline"
+    },
+    "function llama_tokenize": {
+      "declaration": "LLAMA_API int32_t llama_tokenize ( const struct llama_vocab * vocab , const char * text , int32_t text_len , llama_token * tokens , int32_t n_tokens_max , bool add_special , bool parse_special ) ;",
+      "decision": "baseline"
+    },
+    "function llama_version": {
+      "declaration": "LLAMA_API const char * llama_version ( void ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_bos": {
+      "declaration": "LLAMA_API llama_token llama_vocab_bos ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_eos": {
+      "declaration": "LLAMA_API llama_token llama_vocab_eos ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_eot": {
+      "declaration": "LLAMA_API llama_token llama_vocab_eot ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_fim_mid": {
+      "declaration": "LLAMA_API llama_token llama_vocab_fim_mid ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_fim_pad": {
+      "declaration": "LLAMA_API llama_token llama_vocab_fim_pad ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_fim_pre": {
+      "declaration": "LLAMA_API llama_token llama_vocab_fim_pre ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_fim_rep": {
+      "declaration": "LLAMA_API llama_token llama_vocab_fim_rep ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_fim_sep": {
+      "declaration": "LLAMA_API llama_token llama_vocab_fim_sep ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_fim_suf": {
+      "declaration": "LLAMA_API llama_token llama_vocab_fim_suf ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_get_add_bos": {
+      "declaration": "LLAMA_API bool llama_vocab_get_add_bos ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_get_add_eos": {
+      "declaration": "LLAMA_API bool llama_vocab_get_add_eos ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_get_add_sep": {
+      "declaration": "LLAMA_API bool llama_vocab_get_add_sep ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_get_attr": {
+      "declaration": "LLAMA_API enum llama_token_attr llama_vocab_get_attr ( const struct llama_vocab * vocab , llama_token token ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_get_score": {
+      "declaration": "LLAMA_API float llama_vocab_get_score ( const struct llama_vocab * vocab , llama_token token ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_get_suppress_tokens": {
+      "declaration": "LLAMA_API const llama_token * llama_vocab_get_suppress_tokens ( const struct llama_vocab * vocab , int32_t * n_suppress_tokens ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_get_text": {
+      "declaration": "LLAMA_API const char * llama_vocab_get_text ( const struct llama_vocab * vocab , llama_token token ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_is_control": {
+      "declaration": "LLAMA_API bool llama_vocab_is_control ( const struct llama_vocab * vocab , llama_token token ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_is_eog": {
+      "declaration": "LLAMA_API bool llama_vocab_is_eog ( const struct llama_vocab * vocab , llama_token token ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_mask": {
+      "declaration": "LLAMA_API llama_token llama_vocab_mask ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_n_tokens": {
+      "declaration": "LLAMA_API int32_t llama_vocab_n_tokens ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_nl": {
+      "declaration": "LLAMA_API llama_token llama_vocab_nl ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_pad": {
+      "declaration": "LLAMA_API llama_token llama_vocab_pad ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_sep": {
+      "declaration": "LLAMA_API llama_token llama_vocab_sep ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "function llama_vocab_type": {
+      "declaration": "LLAMA_API enum llama_vocab_type llama_vocab_type ( const struct llama_vocab * vocab ) ;",
+      "decision": "baseline"
+    },
+    "struct llama_adapter_lora": {
+      "declaration": "struct llama_adapter_lora ;",
+      "decision": "baseline"
+    },
+    "struct llama_batch": {
+      "declaration": "typedef struct llama_batch { int32_t n_tokens ; llama_token * token ; float * embd ; llama_pos * pos ; int32_t * n_seq_id ; llama_seq_id * * seq_id ; int8_t * logits ; } llama_batch ;",
+      "decision": "baseline"
+    },
+    "struct llama_batch_ext": {
+      "declaration": "struct llama_batch_ext ;",
+      "decision": "baseline"
+    },
+    "struct llama_chat_message": {
+      "declaration": "typedef struct llama_chat_message { const char * role ; const char * content ; } llama_chat_message ;",
+      "decision": "baseline"
+    },
+    "struct llama_context": {
+      "declaration": "struct llama_context ;",
+      "decision": "baseline"
+    },
+    "struct llama_context_params": {
+      "declaration": "struct llama_context_params { uint32_t n_ctx ; uint32_t n_batch ; uint32_t n_ubatch ; uint32_t n_seq_max ; uint32_t n_rs_seq ; uint32_t n_outputs_max ; uint32_t n_outputs_max_per_seq ; int32_t n_threads ; int32_t n_threads_batch ; enum llama_context_type ctx_type ; enum llama_rope_scaling_type rope_scaling_type ; enum llama_pooling_type pooling_type ; enum llama_attention_type attention_type ; enum llama_flash_attn_type flash_attn_type ; float rope_freq_base ; float rope_freq_scale ; float yarn_ext_factor ; float yarn_attn_factor ; float yarn_beta_fast ; float yarn_beta_slow ; uint32_t yarn_orig_ctx ; ggml_backend_sched_eval_callback cb_eval ; void * cb_eval_user_data ; enum ggml_type type_k ; enum ggml_type type_v ; size_t moe_cache_size ; float moe_cache_cpu_share ; ggml_abort_callback abort_callback ; void * abort_callback_data ; bool embeddings ; bool offload_kqv ; bool no_perf ; bool op_offload ; bool swa_full ; bool kv_unified ; struct llama_sampler_seq_config * samplers ; size_t n_samplers ; struct llama_context * ctx_other ; } ;",
+      "decision": "baseline"
+    },
+    "struct llama_embd": {
+      "declaration": "struct llama_embd { const float * data ; size_t n_rows ; size_t n_embd ; } ;",
+      "decision": "baseline"
+    },
+    "struct llama_logit_bias": {
+      "declaration": "typedef struct llama_logit_bias { llama_token token ; float bias ; } llama_logit_bias ;",
+      "decision": "baseline"
+    },
+    "struct llama_model": {
+      "declaration": "struct llama_model ;",
+      "decision": "baseline"
+    },
+    "struct llama_model_imatrix_data": {
+      "declaration": "struct llama_model_imatrix_data { const char * name ; const float * data ; size_t size ; } ;",
+      "decision": "baseline"
+    },
+    "struct llama_model_kv_override": {
+      "declaration": "struct llama_model_kv_override { enum llama_model_kv_override_type tag ; char key [ 128 ] ; union { int64_t val_i64 ; double val_f64 ; bool val_bool ; char val_str [ 128 ] ; } ; } ;",
+      "decision": "baseline"
+    },
+    "struct llama_model_params": {
+      "declaration": "struct llama_model_params { ggml_backend_dev_t * devices ; const struct llama_model_tensor_buft_override * tensor_buft_overrides ; int32_t n_gpu_layers ; enum llama_split_mode split_mode ; enum llama_load_mode load_mode ; enum llama_lazy_mode lazy_mode ; int32_t main_gpu ; const float * tensor_split ; llama_progress_callback progress_callback ; void * progress_callback_user_data ; const struct llama_model_kv_override * kv_overrides ; bool vocab_only ; bool check_tensors ; bool use_extra_bufts ; bool no_host ; bool no_alloc ; bool load_mtp ; } ;",
+      "decision": "baseline"
+    },
+    "struct llama_model_quantize_params": {
+      "declaration": "typedef struct llama_model_quantize_params { int32_t nthread ; enum llama_ftype ftype ; enum ggml_type output_tensor_type ; enum ggml_type token_embedding_type ; bool allow_requantize ; bool quantize_output_tensor ; bool only_copy ; bool pure ; bool keep_split ; bool dry_run ; const struct llama_model_imatrix_data * imatrix ; const struct llama_model_kv_override * kv_overrides ; const struct llama_model_tensor_override * tt_overrides ; const int32_t * prune_layers ; size_t max_buf_size ; } llama_model_quantize_params ;",
+      "decision": "baseline"
+    },
+    "struct llama_model_tensor_buft_override": {
+      "declaration": "struct llama_model_tensor_buft_override { const char * pattern ; ggml_backend_buffer_type_t buft ; } ;",
+      "decision": "baseline"
+    },
+    "struct llama_model_tensor_override": {
+      "declaration": "struct llama_model_tensor_override { const char * pattern ; enum ggml_type type ; } ;",
+      "decision": "baseline"
+    },
+    "struct llama_opt_params": {
+      "declaration": "struct llama_opt_params { uint32_t n_ctx_train ; llama_opt_param_filter param_filter ; void * param_filter_ud ; ggml_opt_get_optimizer_params get_opt_pars ; void * get_opt_pars_ud ; enum ggml_opt_optimizer_type optimizer_type ; } ;",
+      "decision": "baseline"
+    },
+    "struct llama_perf_context_data": {
+      "declaration": "struct llama_perf_context_data { double t_start_ms ; double t_load_ms ; double t_p_eval_ms ; double t_eval_ms ; int32_t n_p_eval ; int32_t n_eval ; int32_t n_reused ; int32_t n_reallocs_same ; int32_t n_reallocs_diff ; } ;",
+      "decision": "baseline"
+    },
+    "struct llama_perf_sampler_data": {
+      "declaration": "struct llama_perf_sampler_data { double t_sample_ms ; int32_t n_sample ; } ;",
+      "decision": "baseline"
+    },
+    "struct llama_sampler": {
+      "declaration": "struct llama_sampler { struct llama_sampler_i * iface ; llama_sampler_context_t ctx ; } ;",
+      "decision": "baseline"
+    },
+    "struct llama_sampler_chain_params": {
+      "declaration": "typedef struct llama_sampler_chain_params { bool no_perf ; } llama_sampler_chain_params ;",
+      "decision": "baseline"
+    },
+    "struct llama_sampler_data": {
+      "declaration": "struct llama_sampler_data { struct ggml_tensor * logits ; struct ggml_tensor * probs ; struct ggml_tensor * sampled ; struct ggml_tensor * candidates ; } ;",
+      "decision": "baseline"
+    },
+    "struct llama_sampler_i": {
+      "declaration": "struct llama_sampler_i { const char * ( * name ) ( const struct llama_sampler * smpl ) ; void ( * accept ) ( struct llama_sampler * smpl , llama_token token ) ; void ( * apply ) ( struct llama_sampler * smpl , llama_token_data_array * cur_p ) ; void ( * reset ) ( struct llama_sampler * smpl ) ; struct llama_sampler * ( * clone ) ( const struct llama_sampler * smpl ) ; void ( * free ) ( struct llama_sampler * smpl ) ; bool ( * backend_init ) ( struct llama_sampler * smpl , ggml_backend_buffer_type_t buft , uint32_t n_outputs_max_per_seq ) ; void ( * backend_accept ) ( struct llama_sampler * smpl , struct ggml_context * ctx , struct ggml_cgraph * gf , struct ggml_tensor * selected_token ) ; void ( * backend_apply ) ( struct llama_sampler * smpl , struct ggml_context * ctx , struct ggml_cgraph * gf , struct llama_sampler_data * data ) ; void ( * backend_set_input ) ( struct llama_sampler * smpl ) ; void ( * backend_reset ) ( struct llama_sampler * smpl ) ; void ( * copy_state ) ( const struct llama_sampler * src , struct llama_sampler * dst ) ; } ;",
+      "decision": "baseline"
+    },
+    "struct llama_sampler_seq_config": {
+      "declaration": "struct llama_sampler_seq_config { llama_seq_id seq_id ; struct llama_sampler * sampler ; } ;",
+      "decision": "baseline"
+    },
+    "struct llama_token_data": {
+      "declaration": "typedef struct llama_token_data { llama_token id ; float logit ; float p ; } llama_token_data ;",
+      "decision": "baseline"
+    },
+    "struct llama_token_data_array": {
+      "declaration": "typedef struct llama_token_data_array { llama_token_data * data ; size_t size ; int64_t selected ; bool sorted ; } llama_token_data_array ;",
+      "decision": "baseline"
+    },
+    "struct llama_vocab": {
+      "declaration": "struct llama_vocab ;",
+      "decision": "baseline"
+    },
+    "typedef llama_memory_t": {
+      "declaration": "typedef struct llama_memory_i * llama_memory_t ;",
+      "decision": "baseline"
+    },
+    "typedef llama_model_set_tensor_data_t": {
+      "declaration": "typedef void ( * llama_model_set_tensor_data_t ) ( struct ggml_tensor * tensor , void * userdata ) ;",
+      "decision": "baseline"
+    },
+    "typedef llama_opt_param_filter": {
+      "declaration": "typedef bool ( * llama_opt_param_filter ) ( const struct ggml_tensor * tensor , void * userdata ) ;",
+      "decision": "baseline"
+    },
+    "typedef llama_pos": {
+      "declaration": "typedef int32_t llama_pos ;",
+      "decision": "baseline"
+    },
+    "typedef llama_progress_callback": {
+      "declaration": "typedef bool ( * llama_progress_callback ) ( float progress , void * user_data ) ;",
+      "decision": "baseline"
+    },
+    "typedef llama_sampler_context_t": {
+      "declaration": "typedef void * llama_sampler_context_t ;",
+      "decision": "baseline"
+    },
+    "typedef llama_seq_id": {
+      "declaration": "typedef int32_t llama_seq_id ;",
+      "decision": "baseline"
+    },
+    "typedef llama_state_seq_flags": {
+      "declaration": "typedef uint32_t llama_state_seq_flags ;",
+      "decision": "baseline"
+    },
+    "typedef llama_token": {
+      "declaration": "typedef int32_t llama_token ;",
+      "decision": "baseline"
+    }
+  }
+}
