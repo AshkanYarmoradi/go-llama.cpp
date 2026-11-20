@@ -103,8 +103,8 @@ llama_perf_sampler_print Writes the numbers to llama.cpp's log, which goes to st
 llama_load_mode_from_str Aborts the process on a name it does not recognise. `ParseLoadMode` matches names against `llama_load_mode_name` instead and returns `LoadModeAuto` for an unknown one.
 
 @pending Extended batch API
-`llama_batch_ext` is a second batch type beside `llama_batch`, which `Batch`, `(*LLama).Decode` and `(*LLama).Encode` already wrap. `llama_batch` takes either token ids or embedding rows for the whole batch; this one can mix them token by token, gives a token several positions (M-RoPE), and carries hidden state over from an earlier stage, which multimodal and multi-token-prediction models use. `llama_process` runs an encode or a decode on one.
-`llama.h` still lists reading logits and embeddings back from it as a TODO. Wrapping it needs a decision on whether it replaces `Batch` or sits beside it.
+`llama_batch_ext` replaces the now-deprecated `llama_batch`, which `Batch`, `(*LLama).Decode` and `(*LLama).Encode` still wrap. It can mix token ids and embeddings token by token, give a token several positions (M-RoPE), and carry hidden state from an earlier stage. `llama_process` runs an encode or a decode on one.
+Migration is deferred: the extended batch requires a context at allocation time, whereas Go's `NewBatch` does not, and `llama.h` still lists reading logits and embeddings back from it as a TODO. Preserve the existing batch lifecycle and output behavior until a tested migration is ready.
 llama_batch_ext_init
 llama_batch_ext_free
 llama_batch_ext_clear
@@ -118,6 +118,10 @@ llama_batch_ext_set_output_embd
 llama_batch_ext_set_output_logits
 llama_batch_ext_set_pos
 llama_process
+
+@pending String-array model metadata
+llama_model_meta_arr_n Currently supports only tokenizer TTS dictionary keys. Defer until the binding needs string-array metadata.
+llama_model_meta_arr_str Returns a model-owned string from the same TTS-only arrays. Defer with the array-length API.
 NOTES
 
 # ---------------------------------------------------------------------------

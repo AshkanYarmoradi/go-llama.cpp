@@ -13,20 +13,27 @@ every pull request.
 The separate [API review gate](../CONTRIBUTING.md#reviewing-llamacpp-api-changes)
 blocks unreviewed changes to public declarations, including fields and enums.
 This coverage page measures function usage, not review approval or full Go exposure.
-Last regenerated against llama.cpp [`32bdc3a`](https://github.com/ggml-org/llama.cpp/commit/32bdc3a89e6528d3e419024c833c5dabf32c7541), committed 2026-11-14.
+Last regenerated against llama.cpp [`d92ea9b`](https://github.com/ggml-org/llama.cpp/commit/d92ea9bb126ab957849dd0c0f1f881a64de7dc86), committed 2026-11-17.
 
 |  |  |
 |---|---|
-| Functions declared with `LLAMA_API` | 238 |
-| Marked `DEPRECATED` upstream | 0 |
-| **Live API surface** | **238** |
-| **Used by the binding** | **191** |
+| Functions declared with `LLAMA_API` | 240 |
+| Marked `DEPRECATED` upstream | 5 |
+| **Live API surface** | **235** |
+| **Used by the binding** | **186** |
 | Excluded on purpose | 15 |
-| Not wrapped yet | 32 |
+| Not wrapped yet | 34 |
 
-Deprecated functions are not wrapped. Where the `DEPRECATED` message names a
-replacement, the binding wraps that instead: `llama_vocab_bos` rather than
-`llama_token_bos`, for example.
+Deprecated functions are not counted. Where the `DEPRECATED` message names a
+replacement, the binding should use that instead: `llama_vocab_bos` rather than
+`llama_token_bos`, for example. These deprecated ones are still in use and
+will break when llama.cpp removes them:
+
+- `llama_batch_free`
+- `llama_batch_get_one`
+- `llama_batch_init`
+- `llama_decode`
+- `llama_encode`
 
 ## Excluded on purpose (15)
 
@@ -74,14 +81,14 @@ Every built-in sampler llama.cpp ships has a Go constructor, such as `SamplerTop
 | `llama_perf_sampler_print` | Writes the numbers to llama.cpp's log, which goes to stderr unless a handler is installed with `SetLogHandler`. `(*Sampler).Perf` returns them as data. |
 | `llama_load_mode_from_str` | Aborts the process on a name it does not recognise. `ParseLoadMode` matches names against `llama_load_mode_name` instead and returns `LoadModeAuto` for an unknown one. |
 
-## Not wrapped yet (32)
+## Not wrapped yet (34)
 
 Live functions the binding does not use yet, with what wrapping them would
 take.
 
 ### Extended batch API (13)
 
-`llama_batch_ext` is a second batch type beside `llama_batch`, which `Batch`, `(*LLama).Decode` and `(*LLama).Encode` already wrap. `llama_batch` takes either token ids or embedding rows for the whole batch; this one can mix them token by token, gives a token several positions (M-RoPE), and carries hidden state over from an earlier stage, which multimodal and multi-token-prediction models use. `llama_process` runs an encode or a decode on one. `llama.h` still lists reading logits and embeddings back from it as a TODO. Wrapping it needs a decision on whether it replaces `Batch` or sits beside it.
+`llama_batch_ext` replaces the now-deprecated `llama_batch`, which `Batch`, `(*LLama).Decode` and `(*LLama).Encode` still wrap. It can mix token ids and embeddings token by token, give a token several positions (M-RoPE), and carry hidden state from an earlier stage. `llama_process` runs an encode or a decode on one. Migration is deferred: the extended batch requires a context at allocation time, whereas Go's `NewBatch` does not, and `llama.h` still lists reading logits and embeddings back from it as a TODO. Preserve the existing batch lifecycle and output behavior until a tested migration is ready.
 
 - `llama_batch_ext_init`
 - `llama_batch_ext_free`
@@ -96,6 +103,13 @@ take.
 - `llama_batch_ext_set_output_logits`
 - `llama_batch_ext_set_pos`
 - `llama_process`
+
+### String-array model metadata (2)
+
+| Function | Notes |
+|---|---|
+| `llama_model_meta_arr_n` | Currently supports only tokenizer TTS dictionary keys. Defer until the binding needs string-array metadata. |
+| `llama_model_meta_arr_str` | Returns a model-owned string from the same TTS-only arrays. Defer with the array-length API. |
 
 ### Not reviewed yet (19)
 
@@ -164,7 +178,7 @@ wrapping a function that has a note, the script names the note so you can
 delete it.
 
 <details>
-<summary>The 191 live functions the binding uses</summary>
+<summary>The 186 live functions the binding uses</summary>
 
 ```text
 llama_adapter_get_alora_invocation_tokens
@@ -177,15 +191,10 @@ llama_adapter_meta_val_str
 llama_adapter_meta_val_str_by_index
 llama_backend_free
 llama_backend_init
-llama_batch_free
-llama_batch_get_one
-llama_batch_init
 llama_chat_apply_template
 llama_chat_builtin_templates
 llama_context_default_params
-llama_decode
 llama_detokenize
-llama_encode
 llama_flash_attn_type_name
 llama_free
 llama_ftype_name
@@ -363,9 +372,14 @@ llama_vocab_type
 </details>
 
 <details>
-<summary>The 0 deprecated functions</summary>
+<summary>The 5 deprecated functions</summary>
 
 ```text
+llama_batch_free
+llama_batch_get_one
+llama_batch_init
+llama_decode
+llama_encode
 ```
 
 </details>

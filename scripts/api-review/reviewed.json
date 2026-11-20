@@ -176,16 +176,19 @@
       "decision": "baseline"
     },
     "function llama_batch_free": {
-      "declaration": "LLAMA_API void llama_batch_free ( struct llama_batch batch ) ;",
-      "decision": "baseline"
+      "declaration": "DEPRECATED ( LLAMA_API void llama_batch_free ( struct llama_batch batch ) , \"use llama_batch_ext_free instead\" ) ;",
+      "decision": "deferred",
+      "reason": "Declaration is deprecated only; Batch.Free and the embedding batch holder must keep freeing their legacy allocations until the paired initialization migration."
     },
     "function llama_batch_get_one": {
-      "declaration": "LLAMA_API struct llama_batch llama_batch_get_one ( llama_token * tokens , int32_t n_tokens ) ;",
-      "decision": "baseline"
+      "declaration": "DEPRECATED ( LLAMA_API struct llama_batch llama_batch_get_one ( llama_token * tokens , int32_t n_tokens ) , \"use llama_batch_ext_init and llama_batch_ext_add_token instead\" ) ;",
+      "decision": "deferred",
+      "reason": "Declaration is deprecated only; Predict uses a borrowed token slice with implicit positions. Defer until its extended batch replacement preserves positions and output selection."
     },
     "function llama_batch_init": {
-      "declaration": "LLAMA_API struct llama_batch llama_batch_init ( int32_t n_tokens , int32_t embd , int32_t n_seq_max ) ;",
-      "decision": "baseline"
+      "declaration": "DEPRECATED ( LLAMA_API struct llama_batch llama_batch_init ( int32_t n_tokens , int32_t embd , int32_t n_seq_max ) , \"use llama_batch_ext_init instead\" ) ;",
+      "decision": "deferred",
+      "reason": "Declaration is deprecated only; Go NewBatch allocates independently of a context, while llama_batch_ext_init requires one. Defer until a compatible batch lifecycle is designed and tested."
     },
     "function llama_chat_apply_template": {
       "declaration": "LLAMA_API int32_t llama_chat_apply_template ( const char * tmpl , const struct llama_chat_message * chat , size_t n_msg , bool add_ass , char * buf , int32_t length ) ;",
@@ -200,8 +203,9 @@
       "decision": "baseline"
     },
     "function llama_decode": {
-      "declaration": "LLAMA_API int32_t llama_decode ( struct llama_context * ctx , struct llama_batch batch ) ;",
-      "decision": "baseline"
+      "declaration": "DEPRECATED ( LLAMA_API int32_t llama_decode ( struct llama_context * ctx , struct llama_batch batch ) , \"use llama_process with LLAMA_PROCESS_TYPE_DECODE instead\" ) ;",
+      "decision": "deferred",
+      "reason": "Declaration and return contract are unchanged apart from deprecation. Predict, embeddings and Decode still use legacy batches; migrate to llama_process with LLAMA_PROCESS_TYPE_DECODE alongside batch ownership and output tests."
     },
     "function llama_detach_threadpool": {
       "declaration": "LLAMA_API void llama_detach_threadpool ( struct llama_context * ctx ) ;",
@@ -213,8 +217,9 @@
       "decision": "baseline"
     },
     "function llama_encode": {
-      "declaration": "LLAMA_API int32_t llama_encode ( struct llama_context * ctx , struct llama_batch batch ) ;",
-      "decision": "baseline"
+      "declaration": "DEPRECATED ( LLAMA_API int32_t llama_encode ( struct llama_context * ctx , struct llama_batch batch ) , \"use llama_process with LLAMA_PROCESS_TYPE_ENCODE instead\" ) ;",
+      "decision": "deferred",
+      "reason": "Declaration and return contract are unchanged apart from deprecation. Encode still accepts a legacy Batch; migrate to llama_process with LLAMA_PROCESS_TYPE_ENCODE alongside the batch lifecycle and encoder tests."
     },
     "function llama_flash_attn_type_name": {
       "declaration": "LLAMA_API const char * llama_flash_attn_type_name ( enum llama_flash_attn_type flash_attn_type ) ;",
@@ -457,6 +462,16 @@
     "function llama_model_load_from_splits": {
       "declaration": "LLAMA_API struct llama_model * llama_model_load_from_splits ( const char * * paths , size_t n_paths , struct llama_model_params params ) ;",
       "decision": "baseline"
+    },
+    "function llama_model_meta_arr_n": {
+      "declaration": "LLAMA_API int32_t llama_model_meta_arr_n ( const struct llama_model * model , const char * key ) ;",
+      "decision": "deferred",
+      "reason": "Counts string-array elements; upstream currently supports only tokenizer.tts_dicts and tokenizer.tts_dict.*. Defer until Go needs TTS dictionary metadata."
+    },
+    "function llama_model_meta_arr_str": {
+      "declaration": "LLAMA_API const char * llama_model_meta_arr_str ( const struct llama_model * model , const char * key , int32_t i ) ;",
+      "decision": "deferred",
+      "reason": "Returns a model-owned string (or null) for the same TTS-only arrays; defer alongside the array count and copy strings into Go when wrapped."
     },
     "function llama_model_meta_count": {
       "declaration": "LLAMA_API int32_t llama_model_meta_count ( const struct llama_model * model ) ;",
