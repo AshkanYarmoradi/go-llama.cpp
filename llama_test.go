@@ -243,9 +243,9 @@ how much is 2+2?
 				_, found := model.ModelMetadataArrayValue("tokenizer.tts_dicts", n)
 				Expect(found).To(BeFalse())
 			}
-			Expect(model.NativeModel()).ToNot(BeNil())
-			Expect(model.NativeContext()).ToNot(BeNil())
-			Expect(model.NativePairedContext()).To(BeNil())
+			Expect(model.NativeModel() != nil).To(BeTrue())
+			Expect(model.NativeContext() != nil).To(BeTrue())
+			Expect(model.NativePairedContext() == nil).To(BeTrue())
 			Expect(model.Tokenize("hello", false, false)).ToNot(BeEmpty())
 			Expect(model.DFlashSelectorTopK()).To(BeNumerically(">=", 0))
 			Expect(model.SetLayerInputEmbeddings(^uint32(0), true)).To(BeFalse())
@@ -351,7 +351,7 @@ how much is 2+2?
 			}
 			Expect(model.Process(ProcessDecode, extended)).To(Equal(0))
 			Expect(model.Logits(-1)).To(HaveLen(model.GetModelInfo().VocabSize))
-			Expect(model.NativeLogits()).ToNot(BeNil())
+			Expect(model.NativeLogits() != nil).To(BeTrue())
 			Expect(model.MemorySeqPosMax(0)).To(Equal(int32(len(tokens) - 1)))
 
 			extended.Reset()
