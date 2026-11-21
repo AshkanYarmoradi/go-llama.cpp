@@ -5,6 +5,7 @@ extern "C" {
 #endif
 
 #include <stdbool.h>
+#include <stddef.h>
 
 extern unsigned char tokenCallback(void *, char *);
 
@@ -50,7 +51,11 @@ void* load_model_splits(const char **paths, int n_paths,
                         int n_ctx, int n_seed, bool memory_f16, bool mlock,
                         bool embeddings, bool mmap, bool low_vram, int n_gpu_layers, int n_batch,
                         const char *maingpu, const char *tensorsplit, bool numa, float rope_freq_base,
-                        float rope_freq_scale, const char *lora, const char *lora_base, int n_seq_max);
+                        float rope_freq_scale, const char *lora, const char *lora_base, int n_seq_max,
+                        int ctx_type, void* paired_state, void* file, void* metadata,
+                        void* set_tensor_data, void* tensor_data_user);
+void* open_file_at(const char* path, long long offset);
+void close_native_file(void* file);
 
 // Sequence state with a llama_state_seq_flags mask, which lets a caller
 // capture part of a sequence rather than all of it. Same buffer contract as
@@ -100,6 +105,7 @@ void llama_binding_free_model(void* state);
 // active on the context (returns 0 on success). clear_lora_adapters detaches
 // and frees every adapter previously applied this way.
 int apply_lora_adapter(void* state_ptr, const char* path, float scale);
+int apply_lora_adapter_file(void* state_ptr, void* file, float scale);
 int clear_lora_adapters(void* state_ptr);
 
 // LoRA adapter introspection and control vectors. Adapters are addressed by
@@ -148,6 +154,57 @@ int batch_n_tokens(void* batch_ptr);
 int batch_add(void* batch_ptr, int token, int pos, const int* seq_ids, int n_seq_ids, bool logits);
 int decode_batch(void* state_ptr, void* batch_ptr);
 int encode_batch(void* state_ptr, void* batch_ptr);
+// Context-bound llama_batch_ext. All embedding data is copied into the batch
+// by the engine. The caller must keep the context alive until the batch is freed.
+void* ext_batch_init(void* state_ptr);
+void ext_batch_free(void* batch);
+void ext_batch_clear(void* batch);
+int ext_batch_add(void* batch, int seq_id);
+int ext_batch_add_token(void* batch, int seq_id, int token);
+int ext_batch_add_embd(void* batch, int seq_id, const float* data, size_t rows, size_t width);
+int ext_batch_add_embd_row(void* batch, int seq_id, int row);
+bool ext_batch_add_seq(void* batch, int idx, int seq_id);
+bool ext_batch_set_pos(void* batch, int idx, const int* pos);
+bool ext_batch_set_embd_token(void* batch, int idx, const float* data, size_t rows, size_t width);
+bool ext_batch_set_embd_state(void* batch, int idx, const float* data, size_t rows, size_t width);
+bool ext_batch_set_embd_state_row(void* batch, int idx, int row);
+bool ext_batch_set_output_embd(void* batch, int idx, bool value);
+bool ext_batch_set_output_logits(void* batch, int idx, bool value);
+int ext_batch_process(void* state_ptr, void* batch, int type, int n_tokens);
+// Native borrowed context/model pointers and speculative-decoding APIs.
+void* native_context(void* state_ptr);
+const void* native_model(void* state_ptr);
+void* native_context_other(void* state_ptr);
+bool set_ctx_state_src(void* state_ptr, void* source_state);
+int get_model_dflash_variant(void* state_ptr);
+int get_model_dflash_selector_top_k(void* state_ptr);
+unsigned int get_model_target_layer_ids_n(void* state_ptr);
+const int* get_model_target_layer_ids(void* state_ptr);
+void set_embeddings_nextn(void* state_ptr, bool enabled, bool masked);
+bool set_nextn_layer_offset(void* state_ptr, int offset);
+float* native_logits(void* state_ptr);
+float* native_embeddings(void* state_ptr);
+float* native_embeddings_nextn(void* state_ptr);
+int get_embeddings_nextn_ith(void* state_ptr, int i, float* out, int out_size);
+bool set_embeddings_layer_inp(void* state_ptr, unsigned int layer, bool enabled);
+float* native_embeddings_layer_inp(void* state_ptr, unsigned int layer);
+void set_embeddings_layer_inp_dev(void* state_ptr, bool enabled);
+bool supports_embd_row(void* state_ptr);
+bool set_embeddings_nextn_dev(void* state_ptr, bool enabled);
+bool get_embeddings_nextn_rows(void* state_ptr, long long row0, long long n_rows, float* out);
+bool set_embeddings_nextn_rows(void* state_ptr, long long row0, long long n_rows, const float* data);
+// Low-level native interoperability. All pointer arguments are C-owned
+// objects or native callback addresses, never pointers into Go memory.
+void attach_threadpool(void* state_ptr, void* threadpool, void* threadpool_batch);
+void detach_threadpool(void* state_ptr);
+void* native_sampler_init(void* iface, void* ctx);
+bool sampler_copy(void* dest, void* source);
+void perf_sampler_print(void* sampler);
+bool opt_param_filter_all(const void* tensor, void* user_data);
+bool opt_init(void* state_ptr, unsigned int n_ctx_train, int optimizer,
+              void* filter, void* filter_data, void* params, void* params_data);
+bool opt_epoch(void* state_ptr, void* dataset, void* train_result, void* eval_result,
+               long long split, void* train_callback, void* eval_callback);
 int get_logits_ith(void* state_ptr, int i, float* out, int out_size);
 int get_embeddings_ith(void* state_ptr, int i, float* out, int out_size);
 int get_embeddings_seq(void* state_ptr, int seq_id, float* out, int out_size);
@@ -220,6 +277,8 @@ int get_model_meta_count(void* state_ptr);
 int get_model_meta_val_str(void* state_ptr, const char* key, char* buf, int buf_size);
 int get_model_meta_key_by_index(void* state_ptr, int i, char* buf, int buf_size);
 int get_model_meta_val_str_by_index(void* state_ptr, int i, char* buf, int buf_size);
+int get_model_meta_arr_n(void* state_ptr, const char* key);
+const char* get_model_meta_arr_str(void* state_ptr, const char* key, int i);
 
 // Chat templates. apply_chat_template formats roles[i]/contents[i] (parallel
 // arrays of n_msg messages) with the given Jinja template; pass an empty tmpl
@@ -394,6 +453,7 @@ void* sampler_init_temp_ext(float t, float delta, float exponent);
 void* sampler_init_xtc(float p, float t, int min_keep, unsigned int seed);
 void* sampler_init_top_n_sigma(float n);
 void* sampler_init_mirostat_v2(unsigned int seed, float tau, float eta);
+void* sampler_init_mirostat_v1(int n_vocab, unsigned int seed, float tau, float eta, int m);
 void* sampler_init_penalties(void* state_ptr, int last_n, float repeat, float freq, float present);
 void* sampler_init_grammar(void* state_ptr, const char* grammar, const char* root);
 // A negative penalty_last_n is the context size (llama_n_ctx), and a larger one

@@ -34,6 +34,21 @@ type ModelOptions struct {
 	// NSeqMax is the number of distinct sequences the context can hold; 0
 	// keeps llama.cpp's default of 1.
 	NSeqMax int
+	// ContextType selects the default or MTP context graph.
+	ContextType ContextType
+	// PairedContext is the target context for a draft context. It must stay
+	// alive until the new context is freed.
+	PairedContext *LLama
+}
+
+// WithContextType selects the engine's llama_context_type.
+func WithContextType(t ContextType) ModelOption {
+	return func(p *ModelOptions) { p.ContextType = t }
+}
+
+// WithPairedContext supplies a target context for speculative decoding.
+func WithPairedContext(target *LLama) ModelOption {
+	return func(p *ModelOptions) { p.PairedContext = target }
 }
 
 // PredictOptions is the per-call configuration Predict applies. Build it with

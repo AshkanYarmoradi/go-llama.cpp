@@ -93,6 +93,9 @@ jobs:
       - name: Every binding.h declaration is defined
         run: bash ./scripts/check-binding-symbols.sh
 
+      - name: Every live llama.cpp function is covered
+        run: bash ./scripts/engine-coverage.sh --require-complete
+
       # docs/engine-coverage.md is generated from llama.h and binding.cpp, so a
       # llama.cpp bump or a new wrapper can leave it behind. That is a warning,
       # never a failure. The Go job separately requires an API review.

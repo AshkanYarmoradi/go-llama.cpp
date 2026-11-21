@@ -15,11 +15,13 @@
 #   scripts/engine-coverage.sh --write     regenerate docs/engine-coverage.md
 #   scripts/engine-coverage.sh --check     exit 1 if docs/engine-coverage.md
 #                                          is out of date
+#   scripts/engine-coverage.sh --require-complete
+#                                          exit 1 if any live function is unused
 #
 # Why a function is left out lives in the notes below, and the page is built
 # from them. Edit the notes, not the page.
 #
-# Exit status: 0 on success, 1 when --check finds the page out of date, 2 when
+# Exit status: 0 on success, 1 when a check fails, 2 when
 # the scan itself fails (a missing submodule, or a header it cannot parse).
 
 set -euo pipefail
@@ -34,7 +36,7 @@ usage() {
 mode=report
 case "${1:-}" in
     "") ;;
-    --markdown | --write | --check) mode="${1#--}" ;;
+    --markdown | --write | --check | --require-complete) mode="${1#--}" ;;
     -h | --help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
 esac
@@ -75,53 +77,6 @@ trap 'rm -rf "$workdir"' EXIT
 # reported so it can be deleted.
 # ---------------------------------------------------------------------------
 cat > "$workdir/notes.txt" <<'NOTES'
-@excluded Requires binding ggml first
-llama_attach_threadpool Takes `ggml_threadpool` objects. Wrapping it means exposing a slice of ggml's threading API, which is a separate project.
-llama_detach_threadpool As above.
-llama_model_init_from_user Builds a model from a ggml `gguf_context` and a C callback that fills in each tensor's data. It serves programs that create weights in memory rather than load a GGUF file.
-Thread counts can be set without a threadpool: see `(*LLama).SetThreads`.
-
-@excluded Needs a C function-pointer vtable Go cannot supply
-llama_sampler_init Builds a custom sampler from a `llama_sampler_i` struct of C function pointers. Go cannot populate one, and a bridge per method would cost a cgo transition per token per stage.
-llama_sampler_copy Copies one sampler into another the caller already allocated; the same constraint. `(*Sampler).Clone` covers the useful case.
-Every built-in sampler llama.cpp ships has a Go constructor, such as `SamplerTopK` or `(*LLama).SamplerGrammar`, except Mirostat v1 (`llama_sampler_init_mirostat`). `Predict` uses it when you pass `SetMirostat(1)`, but there is no stage for building your own chain with it. Mirostat v2 has one: `SamplerMirostatV2`.
-
-@excluded Training API, out of scope
-llama_opt_init This is an inference binding. The optimizer API needs `ggml-opt.h` dataset and callback types, and a different lifecycle.
-llama_opt_epoch As above.
-llama_opt_param_filter_all As above.
-
-@excluded Takes a C `FILE*`
-llama_model_load_from_file_ptr Loads a GGUF from an open `FILE*`, starting at its current offset, so a model can sit inside a larger file. Go has no `FILE*` to pass; supporting it means a new path-and-offset entry point in C. `New` loads by path and `NewFromSplits` loads split files.
-llama_adapter_lora_init_from_file_ptr The same, for a LoRA adapter. `(*LLama).ApplyLoRA` and `SetLoraAdapter` load adapters by path.
-
-@excluded Superseded by something already exposed
-llama_get_logits `llama.h` plans to deprecate it in favour of `llama_get_logits_ith`, which the binding wraps as `(*LLama).Logits(i)`.
-llama_get_embeddings Returns every output token's row in one array. `llama.h` plans to deprecate it in favour of `llama_get_embeddings_ith`, which the binding wraps as `(*LLama).TokenEmbedding(i)`. `(*LLama).SequenceEmbedding` reads pooled rows with `llama_get_embeddings_seq`.
-llama_get_model Recovers the model from a context. The binding keeps both pointers in its own state, so it never needs it.
-llama_perf_sampler_print Writes the numbers to llama.cpp's log, which goes to stderr unless a handler is installed with `SetLogHandler`. `(*Sampler).Perf` returns them as data.
-llama_load_mode_from_str Aborts the process on a name it does not recognise. `ParseLoadMode` matches names against `llama_load_mode_name` instead and returns `LoadModeAuto` for an unknown one.
-
-@pending Extended batch API
-`llama_batch_ext` replaces the now-deprecated `llama_batch`, which `Batch`, `(*LLama).Decode` and `(*LLama).Encode` still wrap. It can mix token ids and embeddings token by token, give a token several positions (M-RoPE), and carry hidden state from an earlier stage. `llama_process` runs an encode or a decode on one.
-Migration is deferred: the extended batch requires a context at allocation time, whereas Go's `NewBatch` does not, and `llama.h` still lists reading logits and embeddings back from it as a TODO. Preserve the existing batch lifecycle and output behavior until a tested migration is ready.
-llama_batch_ext_init
-llama_batch_ext_free
-llama_batch_ext_clear
-llama_batch_ext_add
-llama_batch_ext_add_token
-llama_batch_ext_add_embd
-llama_batch_ext_add_seq
-llama_batch_ext_set_embd_token
-llama_batch_ext_set_embd_state
-llama_batch_ext_set_output_embd
-llama_batch_ext_set_output_logits
-llama_batch_ext_set_pos
-llama_process
-
-@pending String-array model metadata
-llama_model_meta_arr_n Currently supports only tokenizer TTS dictionary keys. Defer until the binding needs string-array metadata.
-llama_model_meta_arr_str Returns a model-owned string from the same TTS-only arrays. Defer with the array-length API.
 NOTES
 
 # ---------------------------------------------------------------------------
@@ -425,9 +380,8 @@ render_page() {
 
 <!-- Generated by scripts/engine-coverage.sh. Edit the notes in that script and run it with --write; do not edit this file by hand. -->
 
-This binding aims to cover llama.cpp's C API. This page records where that
-stands and, more usefully, which functions are left out **on purpose**, so an
-audit that finds them missing does not have to re-derive the reasoning.
+This binding requires coverage of llama.cpp's live C API. This page records
+which functions are used by the binding and identifies any remaining gaps.
 
 The page is generated by [`scripts/engine-coverage.sh`](../scripts/engine-coverage.sh)
 from `llama.cpp/include/llama.h` and `binding.cpp`, and CI re-checks it on
@@ -489,12 +443,11 @@ EOF
         cat "$workdir/pending.md"
     fi
     cat <<'EOF'
-## If you need one of these
+## Missing API?
 
 Open an issue with the [Missing llama.cpp API](https://github.com/AshkanYarmoradi/go-llama.cpp/issues/new?template=engine_api_gap.yml)
-template and say what you are building. Several of the exclusions above are
-judgement calls about cost versus demand, and a concrete use case changes that
-calculation.
+template if an engine function or one of its parameters is not available to
+your Go program.
 
 ## How it is measured
 
@@ -516,13 +469,14 @@ git submodule update --init --recursive    # scan the pinned llama.h
 ./scripts/engine-coverage.sh               # print the counts and every gap
 ./scripts/engine-coverage.sh --write       # rewrite this page
 ./scripts/engine-coverage.sh --check       # exit 1 if this page is out of date
+./scripts/engine-coverage.sh --require-complete # exit 1 if a live function is unused
 ```
 
 It needs only bash and POSIX tools, and gives the same result on Linux and in
 Git Bash on Windows. The Lint workflow runs `--check` and turns a stale page
-into a warning, not a failure, so a llama.cpp bump is never blocked by this
-page. The check skips the "Last regenerated" line, so it fires when the counts
-or lists change, not on every bump.
+into a warning, not a failure. The separate `--require-complete` check blocks
+new gaps in live function coverage. The page check skips the "Last
+regenerated" line, so it fires when counts or lists change, not on every bump.
 
 The reasons on this page live as notes in `scripts/engine-coverage.sh`. To
 record why a function is left out, add a note there and run `--write`. After
@@ -552,6 +506,13 @@ EOF
 case "$mode" in
     report)
         report
+        ;;
+    require-complete)
+        report
+        if [ "$n_covered" -ne "$n_live" ]; then
+            echo "error: every live llama.h function must be covered" >&2
+            exit 1
+        fi
         ;;
     markdown)
         render_page

@@ -471,7 +471,7 @@ sequenceDiagram
     participant T as token callback (Go)
     P->>C: prompt and options, one cgo call
     loop each generated token
-        C->>E: llama_decode
+        C->>E: llama_process (decode)
         E->>A: polled by the CPU backend while the graph runs
         A-->>E: true aborts the decode with status 2
         C->>E: sample, the chain records the token

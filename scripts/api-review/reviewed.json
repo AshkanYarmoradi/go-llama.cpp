@@ -87,8 +87,8 @@
     },
     "function llama_adapter_lora_init_from_file_ptr": {
       "declaration": "LLAMA_API struct llama_adapter_lora * llama_adapter_lora_init_from_file_ptr ( struct llama_model * model , FILE * file ) ;",
-      "decision": "excluded",
-      "reason": "Takes a C FILE pointer; ApplyLoRA exposes loading by path."
+      "decision": "supported",
+      "reason": "ApplyLoRAFromNativeFile and ApplyLoRAFromFileOffset expose the native FILE loader with existing adapter ownership."
     },
     "function llama_adapter_meta_count": {
       "declaration": "LLAMA_API int32_t llama_adapter_meta_count ( const struct llama_adapter_lora * adapter ) ;",
@@ -108,8 +108,8 @@
     },
     "function llama_attach_threadpool": {
       "declaration": "LLAMA_API void llama_attach_threadpool ( struct llama_context * ctx , ggml_threadpool_t threadpool , ggml_threadpool_t threadpool_batch ) ;",
-      "decision": "excluded",
-      "reason": "Requires ggml threadpool objects; SetThreads already exposes thread counts."
+      "decision": "supported",
+      "reason": "AttachNativeThreadpool accepts externally owned native ggml threadpool handles with lifetime documented."
     },
     "function llama_backend_free": {
       "declaration": "LLAMA_API void llama_backend_free ( void ) ;",
@@ -121,74 +121,88 @@
     },
     "function llama_batch_ext_add": {
       "declaration": "LLAMA_API int32_t llama_batch_ext_add ( struct llama_batch_ext * batch , llama_seq_id seq_id ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "ExtendedBatch.Add creates an empty entry populated through SetTokenEmbedding."
     },
     "function llama_batch_ext_add_embd": {
       "declaration": "LLAMA_API int32_t llama_batch_ext_add_embd ( struct llama_batch_ext * batch , llama_seq_id seq_id , struct llama_embd embd ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "ExtendedBatch.AddEmbedding exposes row-major data copied into the native batch."
     },
     "function llama_batch_ext_add_embd_row": {
       "declaration": "LLAMA_API int32_t llama_batch_ext_add_embd_row ( struct llama_batch_ext * batch , llama_seq_id seq_id , int32_t row ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "ExtendedBatch.AddEmbeddingRow exposes paired device-buffer rows with source-context and range checks."
     },
     "function llama_batch_ext_add_seq": {
       "declaration": "LLAMA_API bool llama_batch_ext_add_seq ( struct llama_batch_ext * batch , int32_t idx , llama_seq_id seq_id ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "ExtendedBatch.AddSequence assigns additional sequence IDs, also used by legacy Batch translation."
     },
     "function llama_batch_ext_add_token": {
       "declaration": "LLAMA_API int32_t llama_batch_ext_add_token ( struct llama_batch_ext * batch , llama_seq_id seq_id , llama_token id ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "ExtendedBatch.AddToken exposes token IDs; legacy processing uses the same native entry operation."
     },
     "function llama_batch_ext_clear": {
       "declaration": "LLAMA_API void llama_batch_ext_clear ( struct llama_batch_ext * batch ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "ExtendedBatch.Reset clears the engine batch and Go entry tracking."
     },
     "function llama_batch_ext_free": {
       "declaration": "LLAMA_API void llama_batch_ext_free ( struct llama_batch_ext * batch ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "ExtendedBatch.Free and the internal RAII holder release native batches."
     },
     "function llama_batch_ext_init": {
       "declaration": "LLAMA_API struct llama_batch_ext * llama_batch_ext_init ( struct llama_context * ctx ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "LLama.NewExtendedBatch allocates a context-bound engine batch; legacy Batch also allocates an extended batch at processing time."
     },
     "function llama_batch_ext_set_embd_state": {
       "declaration": "LLAMA_API bool llama_batch_ext_set_embd_state ( struct llama_batch_ext * batch , int32_t idx , struct llama_embd embd ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "ExtendedBatch.SetStateEmbedding supplies a validated hidden-state embedding."
     },
     "function llama_batch_ext_set_embd_state_row": {
       "declaration": "LLAMA_API bool llama_batch_ext_set_embd_state_row ( struct llama_batch_ext * batch , int32_t idx , int32_t row ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "ExtendedBatch.SetStateEmbeddingRow supplies a device-buffer state row with source bounds checks."
     },
     "function llama_batch_ext_set_embd_token": {
       "declaration": "LLAMA_API bool llama_batch_ext_set_embd_token ( struct llama_batch_ext * batch , int32_t idx , struct llama_embd embd ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "ExtendedBatch.SetTokenEmbedding validates row dimensions and copies the supplied data into the batch."
     },
     "function llama_batch_ext_set_output_embd": {
       "declaration": "LLAMA_API bool llama_batch_ext_set_output_embd ( struct llama_batch_ext * batch , int32_t idx , bool value ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "ExtendedBatch.SetOutputEmbedding exposes the upstream embedding output flag."
     },
     "function llama_batch_ext_set_output_logits": {
       "declaration": "LLAMA_API bool llama_batch_ext_set_output_logits ( struct llama_batch_ext * batch , int32_t idx , bool value ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "ExtendedBatch.SetOutputLogits exposes the upstream logits output flag, also used for legacy batches."
     },
     "function llama_batch_ext_set_pos": {
       "declaration": "LLAMA_API bool llama_batch_ext_set_pos ( struct llama_batch_ext * batch , int32_t idx , const llama_pos * pos ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "ExtendedBatch.SetPosition checks position count for token and M-RoPE embedding entries before invoking the native API."
     },
     "function llama_batch_free": {
       "declaration": "DEPRECATED ( LLAMA_API void llama_batch_free ( struct llama_batch batch ) , \"use llama_batch_ext_free instead\" ) ;",
-      "decision": "deferred",
-      "reason": "Declaration is deprecated only; Batch.Free and the embedding batch holder must keep freeing their legacy allocations until the paired initialization migration."
+      "decision": "supported",
+      "reason": "Legacy Go Batch.Free releases its buffered entries; processing batches are RAII-owned with llama_batch_ext_free, eliminating deprecated engine allocations."
     },
     "function llama_batch_get_one": {
       "declaration": "DEPRECATED ( LLAMA_API struct llama_batch llama_batch_get_one ( llama_token * tokens , int32_t n_tokens ) , \"use llama_batch_ext_init and llama_batch_ext_add_token instead\" ) ;",
-      "decision": "deferred",
-      "reason": "Declaration is deprecated only; Predict uses a borrowed token slice with implicit positions. Defer until its extended batch replacement preserves positions and output selection."
+      "decision": "supported",
+      "reason": "Predict builds a llama_batch_ext for each chunk, preserves the position inferred from sequence memory and selects the final token output."
     },
     "function llama_batch_init": {
       "declaration": "DEPRECATED ( LLAMA_API struct llama_batch llama_batch_init ( int32_t n_tokens , int32_t embd , int32_t n_seq_max ) , \"use llama_batch_ext_init instead\" ) ;",
-      "decision": "deferred",
-      "reason": "Declaration is deprecated only; Go NewBatch allocates independently of a context, while llama_batch_ext_init requires one. Defer until a compatible batch lifecycle is designed and tested."
+      "decision": "supported",
+      "reason": "NewBatch still allocates without a context; processing constructs llama_batch_ext with the target context after bounds validation."
     },
     "function llama_chat_apply_template": {
       "declaration": "LLAMA_API int32_t llama_chat_apply_template ( const char * tmpl , const struct llama_chat_message * chat , size_t n_msg , bool add_ass , char * buf , int32_t length ) ;",
@@ -204,13 +218,13 @@
     },
     "function llama_decode": {
       "declaration": "DEPRECATED ( LLAMA_API int32_t llama_decode ( struct llama_context * ctx , struct llama_batch batch ) , \"use llama_process with LLAMA_PROCESS_TYPE_DECODE instead\" ) ;",
-      "decision": "deferred",
-      "reason": "Declaration and return contract are unchanged apart from deprecation. Predict, embeddings and Decode still use legacy batches; migrate to llama_process with LLAMA_PROCESS_TYPE_DECODE alongside batch ownership and output tests."
+      "decision": "supported",
+      "reason": "Decode, Predict and embedding paths now call llama_process with LLAMA_PROCESS_TYPE_DECODE; existing model tests and extended batch regression cover the transition."
     },
     "function llama_detach_threadpool": {
       "declaration": "LLAMA_API void llama_detach_threadpool ( struct llama_context * ctx ) ;",
-      "decision": "excluded",
-      "reason": "Requires ggml threadpool objects; SetThreads already exposes thread counts."
+      "decision": "supported",
+      "reason": "DetachThreadpool exposes the native detach operation."
     },
     "function llama_detokenize": {
       "declaration": "LLAMA_API int32_t llama_detokenize ( const struct llama_vocab * vocab , const llama_token * tokens , int32_t n_tokens , char * text , int32_t text_len_max , bool remove_special , bool unparse_special ) ;",
@@ -218,8 +232,8 @@
     },
     "function llama_encode": {
       "declaration": "DEPRECATED ( LLAMA_API int32_t llama_encode ( struct llama_context * ctx , struct llama_batch batch ) , \"use llama_process with LLAMA_PROCESS_TYPE_ENCODE instead\" ) ;",
-      "decision": "deferred",
-      "reason": "Declaration and return contract are unchanged apart from deprecation. Encode still accepts a legacy Batch; migrate to llama_process with LLAMA_PROCESS_TYPE_ENCODE alongside the batch lifecycle and encoder tests."
+      "decision": "supported",
+      "reason": "Encode uses llama_process with LLAMA_PROCESS_TYPE_ENCODE and retains the micro-batch size guard."
     },
     "function llama_flash_attn_type_name": {
       "declaration": "LLAMA_API const char * llama_flash_attn_type_name ( enum llama_flash_attn_type flash_attn_type ) ;",
@@ -239,12 +253,13 @@
     },
     "function llama_get_ctx_other": {
       "declaration": "LLAMA_API struct llama_context * llama_get_ctx_other ( struct llama_context * ctx ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "NativePairedContext returns the borrowed paired context, configured using WithPairedContext."
     },
     "function llama_get_embeddings": {
       "declaration": "LLAMA_API float * llama_get_embeddings ( struct llama_context * ctx ) ;",
-      "decision": "excluded",
-      "reason": "TokenEmbedding(i) and SequenceEmbedding expose the preferred row accessors."
+      "decision": "supported",
+      "reason": "NativeEmbeddings exposes the borrowed contiguous embedding buffer; Go-owned row access remains TokenEmbedding."
     },
     "function llama_get_embeddings_ith": {
       "declaration": "LLAMA_API float * llama_get_embeddings_ith ( struct llama_context * ctx , int32_t i ) ;",
@@ -252,19 +267,23 @@
     },
     "function llama_get_embeddings_layer_inp": {
       "declaration": "LLAMA_API float * llama_get_embeddings_layer_inp ( struct llama_context * ctx , uint32_t lid ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "UnsafeLayerInputEmbeddings exposes the borrowed host buffer with native preconditions explicitly documented."
     },
     "function llama_get_embeddings_nextn": {
       "declaration": "LLAMA_API float * llama_get_embeddings_nextn ( struct llama_context * ctx ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "NativeNextNEmbeddings exposes the borrowed contiguous NextN buffer and documents its lifetime."
     },
     "function llama_get_embeddings_nextn_ith": {
       "declaration": "LLAMA_API float * llama_get_embeddings_nextn_ith ( struct llama_context * ctx , int32_t i ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "NextNEmbedding copies an indexed native NextN output row into Go memory."
     },
     "function llama_get_embeddings_nextn_rows": {
       "declaration": "LLAMA_API bool llama_get_embeddings_nextn_rows ( struct llama_context * ctx , int64_t row0 , int64_t n_rows , float * out ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "NextNDeviceRows validates dimensions and copies native device rows into Go memory."
     },
     "function llama_get_embeddings_seq": {
       "declaration": "LLAMA_API float * llama_get_embeddings_seq ( struct llama_context * ctx , llama_seq_id seq_id ) ;",
@@ -272,8 +291,8 @@
     },
     "function llama_get_logits": {
       "declaration": "LLAMA_API float * llama_get_logits ( struct llama_context * ctx ) ;",
-      "decision": "excluded",
-      "reason": "Logits(i) exposes the preferred llama_get_logits_ith API."
+      "decision": "supported",
+      "reason": "NativeLogits exposes the borrowed contiguous output buffer; Go-owned row access remains Logits."
     },
     "function llama_get_logits_ith": {
       "declaration": "LLAMA_API float * llama_get_logits_ith ( struct llama_context * ctx , int32_t i ) ;",
@@ -285,8 +304,8 @@
     },
     "function llama_get_model": {
       "declaration": "LLAMA_API const struct llama_model * llama_get_model ( const struct llama_context * ctx ) ;",
-      "decision": "excluded",
-      "reason": "The binding already retains both model and context pointers."
+      "decision": "supported",
+      "reason": "NativeModel returns the borrowed model pointer recovered from the engine context."
     },
     "function llama_get_sampled_candidates_count_ith": {
       "declaration": "LLAMA_API uint32_t llama_get_sampled_candidates_count_ith ( struct llama_context * ctx , int32_t i ) ;",
@@ -322,8 +341,8 @@
     },
     "function llama_load_mode_from_str": {
       "declaration": "LLAMA_API enum llama_load_mode llama_load_mode_from_str ( const char * str ) ;",
-      "decision": "excluded",
-      "reason": "Aborts on unknown names; ParseLoadMode safely matches llama_load_mode_name instead."
+      "decision": "supported",
+      "reason": "ParseLoadMode validates names against the engine before invoking llama_load_mode_from_str to avoid its fatal error path."
     },
     "function llama_load_mode_name": {
       "declaration": "LLAMA_API const char * llama_load_mode_name ( enum llama_load_mode load_mode ) ;",
@@ -407,11 +426,13 @@
     },
     "function llama_model_dflash_selector_top_k": {
       "declaration": "LLAMA_API int32_t llama_model_dflash_selector_top_k ( const struct llama_model * model ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "DFlashSelectorTopK exposes the draft model selector width."
     },
     "function llama_model_dflash_variant": {
       "declaration": "LLAMA_API enum llama_dflash_variant llama_model_dflash_variant ( const struct llama_model * model ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "DFlashVariant returns the corresponding Go enum."
     },
     "function llama_model_free": {
       "declaration": "LLAMA_API void llama_model_free ( struct llama_model * model ) ;",
@@ -435,8 +456,8 @@
     },
     "function llama_model_init_from_user": {
       "declaration": "LLAMA_API struct llama_model * llama_model_init_from_user ( struct gguf_context * metadata , llama_model_set_tensor_data_t set_tensor_data , void * set_tensor_data_ud , struct llama_model_params params ) ;",
-      "decision": "excluded",
-      "reason": "Requires ggml GGUF contexts and tensor-data callbacks; the binding loads models from files."
+      "decision": "supported",
+      "reason": "NewFromNativeGGUF accepts C-owned GGUF metadata and a native tensor initialization callback and returns an owned LLama."
     },
     "function llama_model_is_diffusion": {
       "declaration": "LLAMA_API bool llama_model_is_diffusion ( const struct llama_model * model ) ;",
@@ -456,8 +477,8 @@
     },
     "function llama_model_load_from_file_ptr": {
       "declaration": "LLAMA_API struct llama_model * llama_model_load_from_file_ptr ( FILE * file , struct llama_model_params params ) ;",
-      "decision": "excluded",
-      "reason": "Takes a C FILE pointer; New and NewFromSplits expose loading by path."
+      "decision": "supported",
+      "reason": "NewFromNativeFile and NewFromFileOffset expose loading a GGUF from an open C FILE pointer; model test exercises the file load."
     },
     "function llama_model_load_from_splits": {
       "declaration": "LLAMA_API struct llama_model * llama_model_load_from_splits ( const char * * paths , size_t n_paths , struct llama_model_params params ) ;",
@@ -465,13 +486,13 @@
     },
     "function llama_model_meta_arr_n": {
       "declaration": "LLAMA_API int32_t llama_model_meta_arr_n ( const struct llama_model * model , const char * key ) ;",
-      "decision": "deferred",
-      "reason": "Counts string-array elements; upstream currently supports only tokenizer.tts_dicts and tokenizer.tts_dict.*. Defer until Go needs TTS dictionary metadata."
+      "decision": "supported",
+      "reason": "ModelMetadataArrayLen exposes the string-array count and ModelMetadataArray copies each string; missing keys are covered by model tests."
     },
     "function llama_model_meta_arr_str": {
       "declaration": "LLAMA_API const char * llama_model_meta_arr_str ( const struct llama_model * model , const char * key , int32_t i ) ;",
-      "decision": "deferred",
-      "reason": "Returns a model-owned string (or null) for the same TTS-only arrays; defer alongside the array count and copy strings into Go when wrapped."
+      "decision": "supported",
+      "reason": "ModelMetadataArrayValue copies the model-owned string into Go and reports absent or invalid indices; model tests cover missing keys."
     },
     "function llama_model_meta_count": {
       "declaration": "LLAMA_API int32_t llama_model_meta_count ( const struct llama_model * model ) ;",
@@ -563,11 +584,13 @@
     },
     "function llama_model_target_layer_ids": {
       "declaration": "LLAMA_API const int32_t * llama_model_target_layer_ids ( const struct llama_model * model ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "TargetLayerIDs copies the model-owned layer index array."
     },
     "function llama_model_target_layer_ids_n": {
       "declaration": "LLAMA_API uint32_t llama_model_target_layer_ids_n ( const struct llama_model * model ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "TargetLayerIDs uses the native count to copy exactly the available layer indices."
     },
     "function llama_n_batch": {
       "declaration": "LLAMA_API uint32_t llama_n_batch ( const struct llama_context * ctx ) ;",
@@ -607,18 +630,18 @@
     },
     "function llama_opt_epoch": {
       "declaration": "LLAMA_API void llama_opt_epoch ( struct llama_context * lctx , ggml_opt_dataset_t dataset , ggml_opt_result_t result_train , ggml_opt_result_t result_eval , int64_t idata_split , ggml_opt_epoch_callback callback_train , ggml_opt_epoch_callback callback_eval ) ;",
-      "decision": "excluded",
-      "reason": "Training is outside the scope of this inference binding and requires ggml optimizer types."
+      "decision": "supported",
+      "reason": "NativeOptimizerEpoch exposes native dataset, result and callback handles and validates the split and initialization state."
     },
     "function llama_opt_init": {
       "declaration": "LLAMA_API void llama_opt_init ( struct llama_context * lctx , struct llama_model * model , struct llama_opt_params lopt_params ) ;",
-      "decision": "excluded",
-      "reason": "Training is outside the scope of this inference binding and requires ggml optimizer types."
+      "decision": "supported",
+      "reason": "InitNativeOptimizer exposes native training initialization, typed optimizer selection and optional C-owned callback handles."
     },
     "function llama_opt_param_filter_all": {
       "declaration": "LLAMA_API bool llama_opt_param_filter_all ( const struct ggml_tensor * tensor , void * userdata ) ;",
-      "decision": "excluded",
-      "reason": "Training is outside the scope of this inference binding and requires ggml optimizer types."
+      "decision": "supported",
+      "reason": "OptParamFilterAll directly exposes the native all-parameter filter, also the default for optimizer initialization."
     },
     "function llama_perf_context": {
       "declaration": "LLAMA_API struct llama_perf_context_data llama_perf_context ( const struct llama_context * ctx ) ;",
@@ -638,8 +661,8 @@
     },
     "function llama_perf_sampler_print": {
       "declaration": "LLAMA_API void llama_perf_sampler_print ( const struct llama_sampler * chain ) ;",
-      "decision": "excluded",
-      "reason": "Sampler.Perf returns the data without forcing log output."
+      "decision": "supported",
+      "reason": "Sampler.PerfPrint exposes native chain performance logging with the chain-only guard."
     },
     "function llama_perf_sampler_reset": {
       "declaration": "LLAMA_API void llama_perf_sampler_reset ( struct llama_sampler * chain ) ;",
@@ -655,7 +678,8 @@
     },
     "function llama_process": {
       "declaration": "LLAMA_API int32_t llama_process ( struct llama_context * ctx , enum llama_process_type type , struct llama_batch_ext * batch ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "LLama.Process dispatches context-bound batches using ProcessType; legacy Decode and Encode use the same engine operation."
     },
     "function llama_sampler_accept": {
       "declaration": "LLAMA_API void llama_sampler_accept ( struct llama_sampler * smpl , llama_token token ) ;",
@@ -695,8 +719,8 @@
     },
     "function llama_sampler_copy": {
       "declaration": "LLAMA_API void llama_sampler_copy ( const struct llama_sampler * src , struct llama_sampler * dst ) ;",
-      "decision": "excluded",
-      "reason": "Requires a caller-allocated custom sampler; Sampler.Clone covers the supported use case."
+      "decision": "supported",
+      "reason": "Sampler.CopyFrom checks compatible vtables and chain stage layouts before invoking native copy; unit tests cover success and rejection."
     },
     "function llama_sampler_free": {
       "declaration": "LLAMA_API void llama_sampler_free ( struct llama_sampler * smpl ) ;",
@@ -708,8 +732,8 @@
     },
     "function llama_sampler_init": {
       "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init ( struct llama_sampler_i * iface , llama_sampler_context_t ctx ) ;",
-      "decision": "excluded",
-      "reason": "Requires a C function-pointer vtable for a custom sampler; built-in stages have Go constructors."
+      "decision": "supported",
+      "reason": "NewNativeSampler accepts a native sampler vtable and context, validates required callbacks and uses existing Sampler ownership."
     },
     "function llama_sampler_init_adaptive_p": {
       "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_adaptive_p ( float target , float decay , uint32_t seed ) ;",
@@ -749,7 +773,8 @@
     },
     "function llama_sampler_init_mirostat": {
       "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_mirostat ( int32_t n_vocab , uint32_t seed , float tau , float eta , int32_t m ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "SamplerMirostatV1 exposes a standalone constructor in addition to Predict; the sampler test checks the new stage."
     },
     "function llama_sampler_init_mirostat_v2": {
       "declaration": "LLAMA_API struct llama_sampler * llama_sampler_init_mirostat_v2 ( uint32_t seed , float tau , float eta ) ;",
@@ -817,7 +842,8 @@
     },
     "function llama_set_ctx_state_src": {
       "declaration": "LLAMA_API bool llama_set_ctx_state_src ( struct llama_context * ctx , struct llama_context * ctx_src ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "SetContextStateSource sets the source context and retains its Go reference for the documented lifetime."
     },
     "function llama_set_embeddings": {
       "declaration": "LLAMA_API void llama_set_embeddings ( struct llama_context * ctx , bool embeddings ) ;",
@@ -825,23 +851,28 @@
     },
     "function llama_set_embeddings_layer_inp": {
       "declaration": "LLAMA_API void llama_set_embeddings_layer_inp ( struct llama_context * ctx , uint32_t lid , bool value ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "SetLayerInputEmbeddings validates the layer index and exposes the native output toggle."
     },
     "function llama_set_embeddings_layer_inp_dev": {
       "declaration": "LLAMA_API void llama_set_embeddings_layer_inp_dev ( struct llama_context * ctx , bool value ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "SetLayerInputEmbeddingsDevice exposes the native device-buffer output mode."
     },
     "function llama_set_embeddings_nextn": {
       "declaration": "LLAMA_API void llama_set_embeddings_nextn ( struct llama_context * ctx , bool value , bool masked ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "SetNextNEmbeddings exposes the output and masked flags."
     },
     "function llama_set_embeddings_nextn_dev": {
       "declaration": "LLAMA_API bool llama_set_embeddings_nextn_dev ( struct llama_context * ctx , bool value ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "SetNextNEmbeddingsDevice exposes device delivery and the native fallback status."
     },
     "function llama_set_embeddings_nextn_rows": {
       "declaration": "LLAMA_API bool llama_set_embeddings_nextn_rows ( struct llama_context * ctx , int64_t row0 , int64_t n_rows , const float * data ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "SetNextNDeviceRows validates row range and data width before copying into the device buffer."
     },
     "function llama_set_n_threads": {
       "declaration": "LLAMA_API void llama_set_n_threads ( struct llama_context * ctx , int32_t n_threads , int32_t n_threads_batch ) ;",
@@ -849,7 +880,8 @@
     },
     "function llama_set_nextn_layer_offset": {
       "declaration": "LLAMA_API void llama_set_nextn_layer_offset ( struct llama_context * ctx , int32_t offset ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "SetNextNLayerOffset validates and exposes the native NextN layer selector."
     },
     "function llama_set_sampler": {
       "declaration": "LLAMA_API bool llama_set_sampler ( struct llama_context * ctx , llama_seq_id seq_id , struct llama_sampler * smpl ) ;",
@@ -917,7 +949,8 @@
     },
     "function llama_supports_embd_row": {
       "declaration": "LLAMA_API bool llama_supports_embd_row ( const struct llama_context * ctx ) ;",
-      "decision": "baseline"
+      "decision": "supported",
+      "reason": "SupportsEmbeddingRows exposes native capability, also checked before adding a device row."
     },
     "function llama_supports_gpu_offload": {
       "declaration": "LLAMA_API bool llama_supports_gpu_offload ( void ) ;",

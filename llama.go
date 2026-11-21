@@ -32,6 +32,8 @@ type LLama struct {
 	state       unsafe.Pointer
 	embeddings  bool
 	contextSize int
+	paired      *LLama
+	stateSource *LLama
 }
 
 // New loads a GGUF model and creates a context for it. Call Free on the result
@@ -56,6 +58,20 @@ func NewFromSplits(paths []string, opts ...ModelOption) (*LLama, error) {
 }
 
 func newModel(paths []string, mo ModelOptions) (*LLama, error) {
+	return newModelWithInput(paths, nil, nil, nil, nil, mo)
+}
+
+func newModelWithInput(paths []string, file, metadata, setTensorData, userData unsafe.Pointer, mo ModelOptions) (*LLama, error) {
+	if mo.ContextType != ContextDefault && mo.ContextType != ContextMTP {
+		return nil, fmt.Errorf("llama: unsupported context type %d", mo.ContextType)
+	}
+	var pairedState unsafe.Pointer
+	if mo.PairedContext != nil {
+		pairedState = mo.PairedContext.state
+		if pairedState == nil {
+			return nil, errors.New("llama: paired context is freed")
+		}
+	}
 	// Every C string allocated here is freed on the way out, whether the load
 	// succeeds or not.
 	var toFree []*C.char
@@ -74,21 +90,32 @@ func newModel(paths []string, mo ModelOptions) (*LLama, error) {
 	for i, p := range paths {
 		cPaths[i] = cstr(p)
 	}
+	var pathPtr **C.char
+	label := "native GGUF"
+	if file != nil {
+		label = "native file"
+	}
+	if len(paths) > 0 {
+		pathPtr = (**C.char)(unsafe.Pointer(&cPaths[0]))
+		label = paths[0]
+	}
 
 	result := C.load_model_splits(
-		(**C.char)(unsafe.Pointer(&cPaths[0])), C.int(len(cPaths)),
+		pathPtr, C.int(len(cPaths)),
 		C.int(mo.ContextSize), C.int(mo.Seed),
 		C.bool(mo.F16Memory), C.bool(mo.MLock), C.bool(mo.Embeddings), C.bool(mo.MMap), C.bool(mo.LowVRAM),
 		C.int(mo.NGPULayers), C.int(mo.NBatch), cstr(mo.MainGPU), cstr(mo.TensorSplit), C.bool(mo.NUMA),
 		C.float(mo.FreqRopeBase), C.float(mo.FreqRopeScale),
 		cstr(mo.LoraAdapter), cstr(mo.LoraBase),
 		C.int(mo.NSeqMax),
+		C.int(mo.ContextType), pairedState,
+		file, metadata, setTensorData, userData,
 	)
 	if result == nil {
-		return nil, fmt.Errorf("failed loading model %q", paths[0])
+		return nil, fmt.Errorf("failed loading model %q", label)
 	}
 
-	return &LLama{state: result, contextSize: mo.ContextSize, embeddings: mo.Embeddings}, nil
+	return &LLama{state: result, contextSize: mo.ContextSize, embeddings: mo.Embeddings, paired: mo.PairedContext}, nil
 }
 
 // Free releases the model and its context. The LLama must not be used
@@ -106,6 +133,8 @@ func (l *LLama) Free() {
 	clearCallbacks(l.state)
 	C.llama_binding_free_model(l.state)
 	l.state = nil
+	l.paired = nil
+	l.stateSource = nil
 }
 
 // ApplyLoRA loads a LoRA adapter from path and applies it to the context with
@@ -251,7 +280,7 @@ func adapterString(fn func(buf []byte) int) string {
 
 // Batch accumulates tokens — each with a position, sequence IDs, and a flag for
 // whether its output is wanted — for a Decode or Encode call. It wraps the
-// engine's llama_batch; call Free when done.
+// engine's extended batch API at processing time; call Free when done.
 type Batch struct {
 	ptr      unsafe.Pointer
 	capacity int
@@ -290,6 +319,8 @@ func (b *Batch) Add(token int32, pos int32, seqIDs []int32, logits bool) error {
 		return fmt.Errorf("batch is full (capacity %d)", b.capacity)
 	case -2:
 		return fmt.Errorf("too many sequence IDs for one token (%d)", len(seqIDs))
+	case -3:
+		return errors.New("failed to allocate batch entry")
 	}
 	return nil
 }
@@ -1471,6 +1502,44 @@ func (l *LLama) ModelMetadataValue(key string) (string, bool) {
 		return int(C.get_model_meta_val_str(l.state, cKey,
 			(*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
 	})
+}
+
+// ModelMetadataArrayLen returns the number of strings in a GGUF metadata
+// array, or -1 when the array is absent. Upstream currently keeps only the
+// tokenizer TTS dictionary arrays.
+func (l *LLama) ModelMetadataArrayLen(key string) int {
+	cKey := C.CString(key)
+	defer C.free(unsafe.Pointer(cKey))
+	return int(C.get_model_meta_arr_n(l.state, cKey))
+}
+
+// ModelMetadataArrayValue returns a copy of the indexed string-array element.
+// The boolean is false when the array or index is absent.
+func (l *LLama) ModelMetadataArrayValue(key string, index int) (string, bool) {
+	if index < 0 || index > math.MaxInt32 {
+		return "", false
+	}
+	cKey := C.CString(key)
+	defer C.free(unsafe.Pointer(cKey))
+	value := C.get_model_meta_arr_str(l.state, cKey, C.int(index))
+	if value == nil {
+		return "", false
+	}
+	return C.GoString(value), true
+}
+
+// ModelMetadataArray returns the complete GGUF string array, or nil when it
+// is absent. The returned strings are independent of the model's lifetime.
+func (l *LLama) ModelMetadataArray(key string) []string {
+	n := l.ModelMetadataArrayLen(key)
+	if n < 0 {
+		return nil
+	}
+	values := make([]string, n)
+	for i := range values {
+		values[i], _ = l.ModelMetadataArrayValue(key, i)
+	}
+	return values
 }
 
 // grow calls fn with an increasingly large buffer until the written value fits.
