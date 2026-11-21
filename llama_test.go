@@ -25,6 +25,17 @@ var _ = Describe("LLama binding", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(model).To(BeNil())
 		})
+
+		It("validates native inputs before calling the engine", func() {
+			_, err := NewFromNativeFile(nil)
+			Expect(err).To(HaveOccurred())
+			_, err = NewFromNativeGGUF(nil, nil, nil)
+			Expect(err).To(HaveOccurred())
+			_, err = NewFromFileOffset("does-not-exist.gguf", 0)
+			Expect(err).To(HaveOccurred())
+			Expect(NewNativeSampler(nil, nil)).To(BeNil())
+			Expect(OptParamFilterAll(nil, nil)).To(BeTrue())
+		})
 	})
 	Context("Inferencing tests (using "+testModelPath+") ", func() {
 		getModel := func() (*LLama, error) {
@@ -200,7 +211,9 @@ how much is 2+2?
 				Skip("test skipped - only makes sense if the TEST_MODEL environment variable is set.")
 			}
 
-			model, _ := getModel()
+			model, err := NewFromFileOffset(testModelPath, 0, SetContext(128), SetMMap(true), SetNBatch(512))
+			Expect(err).ToNot(HaveOccurred())
+			defer model.Free()
 			meta := model.ModelMetadata()
 			Expect(meta).ToNot(BeEmpty())
 			Expect(meta).To(HaveKey("general.architecture"))
@@ -212,6 +225,33 @@ how much is 2+2?
 
 			_, ok = model.ModelMetadataValue("this.key.does.not.exist")
 			Expect(ok).To(BeFalse())
+
+			Expect(model.ModelMetadataArrayLen("this.key.does.not.exist")).To(Equal(-1))
+			_, ok = model.ModelMetadataArrayValue("this.key.does.not.exist", 0)
+			Expect(ok).To(BeFalse())
+			Expect(model.ModelMetadataArray("this.key.does.not.exist")).To(BeNil())
+			_, ok = model.ModelMetadataArrayValue("tokenizer.tts_dicts", -1)
+			Expect(ok).To(BeFalse())
+			if n := model.ModelMetadataArrayLen("tokenizer.tts_dicts"); n >= 0 {
+				values := model.ModelMetadataArray("tokenizer.tts_dicts")
+				Expect(values).To(HaveLen(n))
+				for i, value := range values {
+					got, found := model.ModelMetadataArrayValue("tokenizer.tts_dicts", i)
+					Expect(found).To(BeTrue())
+					Expect(got).To(Equal(value))
+				}
+				_, found := model.ModelMetadataArrayValue("tokenizer.tts_dicts", n)
+				Expect(found).To(BeFalse())
+			}
+			Expect(model.NativeModel() != nil).To(BeTrue())
+			Expect(model.NativeContext() != nil).To(BeTrue())
+			Expect(model.NativePairedContext() == nil).To(BeTrue())
+			Expect(model.Tokenize("hello", false, false)).ToNot(BeEmpty())
+			Expect(model.DFlashSelectorTopK()).To(BeNumerically(">=", 0))
+			Expect(model.SetLayerInputEmbeddings(^uint32(0), true)).To(BeFalse())
+			Expect(model.NextNDeviceRows(-1, 1)).To(BeNil())
+			Expect(model.SetNextNDeviceRows(0, 1, nil)).To(BeFalse())
+			Expect(model.ApplyLoRAFromNativeFile(nil, 1)).To(HaveOccurred())
 		})
 
 		It("reports an error for a missing LoRA adapter", func() {
@@ -270,6 +310,7 @@ how much is 2+2?
 			model, err := New(testModelPath, EnableF16Memory, SetContext(128), SetMMap(true), SetNBatch(512))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(model).ToNot(BeNil())
+			defer model.Free()
 			model.MemoryClear(true)
 
 			tokens := model.Tokenize("The capital of France is", true, false)
@@ -296,6 +337,33 @@ how much is 2+2?
 			}
 			Expect(bestIdx).To(BeNumerically(">=", 0))
 			Expect(bestIdx).To(BeNumerically("<", model.GetModelInfo().VocabSize))
+			model.MemoryClear(true)
+			extended := model.NewExtendedBatch()
+			Expect(extended).ToNot(BeNil())
+			defer extended.Free()
+			Expect(extended.AddToken(0, -1)).To(Equal(-2))
+			Expect(extended.Len()).To(BeZero())
+			for i, token := range tokens {
+				Expect(extended.AddToken(0, token)).To(Equal(i))
+				Expect(extended.SetPosition(i, nil)).To(BeFalse())
+				Expect(extended.SetPosition(i, []int32{int32(i)})).To(BeTrue())
+				Expect(extended.SetOutputLogits(i, i == len(tokens)-1)).To(BeTrue())
+			}
+			Expect(model.Process(ProcessDecode, extended)).To(Equal(0))
+			Expect(model.Logits(-1)).To(HaveLen(model.GetModelInfo().VocabSize))
+			Expect(model.NativeLogits() != nil).To(BeTrue())
+			Expect(model.MemorySeqPosMax(0)).To(Equal(int32(len(tokens) - 1)))
+
+			extended.Reset()
+			Expect(extended.Len()).To(BeZero())
+			Expect(extended.Add(0)).To(Equal(0))
+			Expect(model.Process(ProcessDecode, extended)).To(Equal(-1))
+			extended.Reset()
+			Expect(extended.AddToken(0, tokens[0])).To(Equal(0))
+			Expect(extended.SetPosition(0, []int32{int32(len(tokens))})).To(BeTrue())
+			Expect(extended.SetOutputEmbedding(0, true)).To(BeTrue())
+			Expect(model.Process(ProcessDecode, extended)).To(Equal(0))
+			Expect(model.MemorySeqPosMax(0)).To(Equal(int32(len(tokens))))
 		})
 	})
 
@@ -888,6 +956,27 @@ how much is 2+2?
 			clone.Remove(0).Free()
 			Expect(clone.Len()).To(Equal(1))
 			Expect(chain.Len()).To(Equal(2))
+		})
+
+		It("copies compatible sampler state and rejects incompatible chains", func() {
+			source := NewSamplerChain()
+			defer source.Free()
+			source.Add(SamplerTopK(40))
+			source.Add(SamplerDist(99))
+			dest := NewSamplerChain()
+			defer dest.Free()
+			dest.Add(SamplerTopK(20))
+			dest.Add(SamplerDist(7))
+			Expect(dest.CopyFrom(source)).To(BeTrue())
+			Expect(dest.At(1).Seed()).To(Equal(uint32(99)))
+			dest.PerfPrint()
+			dest.Remove(0).Free()
+			Expect(dest.CopyFrom(source)).To(BeFalse())
+			mirostat := SamplerMirostatV1(100, 123, 5, 0.1, 20)
+			Expect(mirostat).ToNot(BeNil())
+			defer mirostat.Free()
+			Expect(mirostat.Name()).To(ContainSubstring("mirostat"))
+			Expect(mirostat.CopyFrom(source)).To(BeFalse())
 		})
 
 		It("tolerates an empty sampler", func() {

@@ -47,12 +47,20 @@ struct llama_binding_state {
     // The flags and bytes of the latest on-device sequence capture of each
     // sequence id, which state_seq_set_data_ext checks a restore against.
     std::map<int, std::pair<unsigned int, std::vector<uint8_t>>> on_device_seq;
+    bool optimizer_initialized = false;
+    bool optimizer_ready = false;
 };
 
-// Wrapper around a llama_batch that also remembers its capacity, so batch_add
-// can bounds-check (llama_batch itself only stores the current token count).
+// The Go Batch can be created before a model or context exists. Store its
+// entries until Decode/Encode can allocate an engine batch for that context.
 struct binding_batch {
-    llama_batch batch;
+    struct entry {
+        llama_token token;
+        llama_pos pos;
+        std::vector<llama_seq_id> seq_ids;
+        bool output;
+    };
+    std::vector<entry> entries;
     int32_t capacity;
     int32_t n_seq_max;
 };
@@ -228,15 +236,24 @@ static bool parse_tensor_split(const char * str, size_t n_max, std::vector<float
     return true;
 }
 
-// Owns a llama_batch for the length of a scope, so it is freed on every
-// return path, including an exception.
-struct batch_holder {
-    llama_batch batch;
-    explicit batch_holder(int32_t n_tokens) : batch(llama_batch_init(n_tokens, 0, 1)) {}
-    ~batch_holder() { llama_batch_free(batch); }
-    batch_holder(const batch_holder &) = delete;
-    batch_holder & operator=(const batch_holder &) = delete;
-};
+using batch_holder = std::unique_ptr<llama_batch_ext, decltype(&llama_batch_ext_free)>;
+
+static batch_holder make_batch(llama_context * ctx) {
+    return batch_holder(llama_batch_ext_init(ctx), llama_batch_ext_free);
+}
+
+static bool append_batch_token(llama_batch_ext * batch, llama_token token,
+                               llama_pos pos, const llama_seq_id * seq_ids,
+                               int n_seq_ids, bool output) {
+    if (n_seq_ids <= 0) return false;
+    const int32_t idx = llama_batch_ext_add_token(batch, seq_ids[0], token);
+    if (idx < 0) return false;
+    for (int i = 1; i < n_seq_ids; ++i) {
+        if (!llama_batch_ext_add_seq(batch, idx, seq_ids[i])) return false;
+    }
+    return llama_batch_ext_set_pos(batch, idx, &pos) &&
+           llama_batch_ext_set_output_logits(batch, idx, output);
+}
 
 // The most tokens one llama_decode call on ctx may carry. The engine
 // GGML_ASSERTs on a larger batch, which aborts the process, so every path that
@@ -301,17 +318,15 @@ int embed_tokens(void* state_ptr, const int* tokens, int n_tokens, float* out, i
         // last one is the row read below when there is no pooling, and an
         // embeddings context outputs every token anyway (the engine overrides
         // unset flags, with a warning).
-        batch_holder b(n_tokens);
+        auto b = make_batch(ctx);
+        const llama_seq_id seq = 0;
         for (int i = 0; i < n_tokens; i++) {
-            b.batch.token[i]     = tokens[i];
-            b.batch.pos[i]       = i;
-            b.batch.n_seq_id[i]  = 1;
-            b.batch.seq_id[i][0] = 0;
-            b.batch.logits[i]    = 1;
+            if (!append_batch_token(b.get(), tokens[i], i, &seq, 1, true)) {
+                return EMBED_ERR_DECODE;
+            }
         }
-        b.batch.n_tokens = n_tokens;
 
-        if (llama_decode(ctx, b.batch) != 0) {
+        if (llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, b.get()) != 0) {
             fprintf(stderr, "%s: failed to decode\n", __func__);
             return EMBED_ERR_DECODE;
         }
@@ -344,88 +359,337 @@ int embed_tokens(void* state_ptr, const int* tokens, int n_tokens, float* out, i
 // ---------------------------------------------------------------------------
 
 void* batch_init(int n_tokens, int n_seq_max) {
-    binding_batch* w = new binding_batch;
-    w->batch = llama_batch_init(n_tokens, 0, n_seq_max);
-    w->capacity = n_tokens;
-    w->n_seq_max = n_seq_max;
-    return w;
+    return new binding_batch{{}, n_tokens, n_seq_max};
 }
 
 void batch_free(void* batch_ptr) {
     binding_batch* w = (binding_batch*) batch_ptr;
-    llama_batch_free(w->batch);
     delete w;
 }
 
 void batch_clear(void* batch_ptr) {
-    ((binding_batch*) batch_ptr)->batch.n_tokens = 0;
+    ((binding_batch*) batch_ptr)->entries.clear();
 }
 
 int batch_n_tokens(void* batch_ptr) {
-    return ((binding_batch*) batch_ptr)->batch.n_tokens;
+    return (int)((binding_batch*) batch_ptr)->entries.size();
 }
 
 // Append one token at position pos for the given sequence ids, flagging whether
 // its output (logits/embeddings) is wanted. Returns the slot index, -1 if the
-// batch is full, or -2 if n_seq_ids exceeds the batch's configured n_seq_max.
+// batch is full, -2 for invalid sequence counts, or -3 on allocation failure.
 int batch_add(void* batch_ptr, int token, int pos, const int* seq_ids, int n_seq_ids, bool logits) {
     binding_batch* w = (binding_batch*) batch_ptr;
-    llama_batch & b = w->batch;
-    if (b.n_tokens >= w->capacity) {
+    if ((int) w->entries.size() >= w->capacity) {
         return -1;
     }
-    if (n_seq_ids > w->n_seq_max) {
+    if (n_seq_ids <= 0 || n_seq_ids > w->n_seq_max) {
         return -2;
     }
-    const int idx = b.n_tokens;
-    b.token[idx]    = token;
-    b.pos[idx]      = pos;
-    b.n_seq_id[idx] = n_seq_ids;
-    for (int k = 0; k < n_seq_ids; k++) {
-        b.seq_id[idx][k] = seq_ids[k];
+    const int idx = (int) w->entries.size();
+    try {
+        w->entries.push_back({ token, pos, { seq_ids, seq_ids + n_seq_ids }, logits });
+        return idx;
+    } catch (const std::exception &) {
+        return -3;
     }
-    b.logits[idx] = logits ? 1 : 0;
-    b.n_tokens++;
-    return idx;
 }
 
-// Decode a batch using the KV cache. Returns llama_decode's status: 0 success,
-// 1 = no KV slot, 2 = aborted, negative = error. A batch larger than the
-// context accepts in one decode is -1 here rather than an engine abort.
-int decode_batch(void* state_ptr, void* batch_ptr) {
-    llama_binding_state* state = (llama_binding_state*) state_ptr;
-    const llama_batch & batch = ((binding_batch*) batch_ptr)->batch;
-    const int32_t limit = max_batch_tokens(state->ctx);
-    if (batch.n_tokens > limit) {
+static int process_batch(llama_context * ctx, const binding_batch & batch, llama_process_type type) {
+    const int32_t limit = type == LLAMA_PROCESS_TYPE_ENCODE
+        ? (int32_t) llama_n_ubatch(ctx) : max_batch_tokens(ctx);
+    const int32_t n_tokens = (int32_t) batch.entries.size();
+    if (n_tokens > limit) {
         fprintf(stderr, "%s: batch holds %d tokens, more than the context's n_batch (%d)\n",
-                __func__, batch.n_tokens, limit);
+                __func__, n_tokens, limit);
         return -1;
     }
     try {
-        return llama_decode(state->ctx, batch);
+        auto ext = make_batch(ctx);
+        for (const auto & e : batch.entries) {
+            if (!append_batch_token(ext.get(), e.token, e.pos, e.seq_ids.data(),
+                                    (int)e.seq_ids.size(), e.output)) return -1;
+        }
+        return llama_process(ctx, type, ext.get());
     } catch (const std::exception & e) {
         fprintf(stderr, "%s: %s\n", __func__, e.what());
         return -1;
     }
+}
+
+int decode_batch(void* state_ptr, void* batch_ptr) {
+    return process_batch(((llama_binding_state*) state_ptr)->ctx,
+                         *(binding_batch*) batch_ptr, LLAMA_PROCESS_TYPE_DECODE);
 }
 
 // Encode a batch (encoder-decoder models). Returns 0 on success, negative on
 // error, including a batch larger than one encoder pass accepts.
 int encode_batch(void* state_ptr, void* batch_ptr) {
-    llama_binding_state* state = (llama_binding_state*) state_ptr;
-    const llama_batch & batch = ((binding_batch*) batch_ptr)->batch;
-    // An encoder pass cannot be split into micro-batches.
-    const int32_t limit = (int32_t) llama_n_ubatch(state->ctx);
-    if (batch.n_tokens > limit) {
-        fprintf(stderr, "%s: batch holds %d tokens, more than the context's n_ubatch (%d)\n",
-                __func__, batch.n_tokens, limit);
-        return -1;
-    }
+    return process_batch(((llama_binding_state*) state_ptr)->ctx,
+                         *(binding_batch*) batch_ptr, LLAMA_PROCESS_TYPE_ENCODE);
+}
+
+void* ext_batch_init(void* state_ptr) {
     try {
-        return llama_encode(state->ctx, batch);
+        return llama_batch_ext_init(((llama_binding_state*) state_ptr)->ctx);
+    } catch (const std::exception &) {
+        return nullptr;
+    }
+}
+
+void ext_batch_free(void* batch) {
+    llama_batch_ext_free((llama_batch_ext*) batch);
+}
+
+void ext_batch_clear(void* batch) {
+    llama_batch_ext_clear((llama_batch_ext*) batch);
+}
+
+int ext_batch_add(void* batch, int seq_id) {
+    return llama_batch_ext_add((llama_batch_ext*) batch, seq_id);
+}
+
+int ext_batch_add_token(void* batch, int seq_id, int token) {
+    return llama_batch_ext_add_token((llama_batch_ext*) batch, seq_id, token);
+}
+
+int ext_batch_add_embd(void* batch, int seq_id, const float* data, size_t rows, size_t width) {
+    return llama_batch_ext_add_embd((llama_batch_ext*) batch, seq_id, {data, rows, width});
+}
+
+int ext_batch_add_embd_row(void* batch, int seq_id, int row) {
+    return llama_batch_ext_add_embd_row((llama_batch_ext*) batch, seq_id, row);
+}
+
+bool ext_batch_add_seq(void* batch, int idx, int seq_id) {
+    return llama_batch_ext_add_seq((llama_batch_ext*) batch, idx, seq_id);
+}
+
+bool ext_batch_set_pos(void* batch, int idx, const int* pos) {
+    return llama_batch_ext_set_pos((llama_batch_ext*) batch, idx, pos);
+}
+
+bool ext_batch_set_embd_token(void* batch, int idx, const float* data, size_t rows, size_t width) {
+    return llama_batch_ext_set_embd_token((llama_batch_ext*) batch, idx, {data, rows, width});
+}
+
+bool ext_batch_set_embd_state(void* batch, int idx, const float* data, size_t rows, size_t width) {
+    return llama_batch_ext_set_embd_state((llama_batch_ext*) batch, idx, {data, rows, width});
+}
+
+bool ext_batch_set_embd_state_row(void* batch, int idx, int row) {
+    return llama_batch_ext_set_embd_state_row((llama_batch_ext*) batch, idx, row);
+}
+
+bool ext_batch_set_output_embd(void* batch, int idx, bool value) {
+    return llama_batch_ext_set_output_embd((llama_batch_ext*) batch, idx, value);
+}
+
+bool ext_batch_set_output_logits(void* batch, int idx, bool value) {
+    return llama_batch_ext_set_output_logits((llama_batch_ext*) batch, idx, value);
+}
+
+int ext_batch_process(void* state_ptr, void* batch, int type, int n_tokens) {
+    llama_context * ctx = ((llama_binding_state*) state_ptr)->ctx;
+    const int32_t limit = type == LLAMA_PROCESS_TYPE_ENCODE
+        ? (int32_t) llama_n_ubatch(ctx) : max_batch_tokens(ctx);
+    if (n_tokens > limit) return -1;
+    try {
+        return llama_process(ctx, (llama_process_type) type, (llama_batch_ext*) batch);
     } catch (const std::exception & e) {
         fprintf(stderr, "%s: %s\n", __func__, e.what());
         return -1;
+    }
+}
+
+void* native_context(void* state_ptr) {
+    return ((llama_binding_state*) state_ptr)->ctx;
+}
+
+const void* native_model(void* state_ptr) {
+    return llama_get_model(((llama_binding_state*) state_ptr)->ctx);
+}
+
+void* native_context_other(void* state_ptr) {
+    return llama_get_ctx_other(((llama_binding_state*) state_ptr)->ctx);
+}
+
+bool set_ctx_state_src(void* state_ptr, void* source_state) {
+    return llama_set_ctx_state_src(((llama_binding_state*) state_ptr)->ctx,
+                                  source_state ? ((llama_binding_state*) source_state)->ctx : nullptr);
+}
+
+int get_model_dflash_variant(void* state_ptr) {
+    return llama_model_dflash_variant(((llama_binding_state*) state_ptr)->model);
+}
+
+int get_model_dflash_selector_top_k(void* state_ptr) {
+    return llama_model_dflash_selector_top_k(((llama_binding_state*) state_ptr)->model);
+}
+
+unsigned int get_model_target_layer_ids_n(void* state_ptr) {
+    return llama_model_target_layer_ids_n(((llama_binding_state*) state_ptr)->model);
+}
+
+const int* get_model_target_layer_ids(void* state_ptr) {
+    return llama_model_target_layer_ids(((llama_binding_state*) state_ptr)->model);
+}
+
+void set_embeddings_nextn(void* state_ptr, bool enabled, bool masked) {
+    llama_set_embeddings_nextn(((llama_binding_state*) state_ptr)->ctx, enabled, masked);
+}
+
+bool set_nextn_layer_offset(void* state_ptr, int offset) {
+    llama_binding_state * state = (llama_binding_state*) state_ptr;
+    if (offset < 0 || (offset > 0 && offset >= llama_model_n_layer_nextn(state->model))) return false;
+    llama_set_nextn_layer_offset(state->ctx, offset);
+    return true;
+}
+
+float* native_logits(void* state_ptr) {
+    return llama_get_logits(((llama_binding_state*) state_ptr)->ctx);
+}
+
+float* native_embeddings(void* state_ptr) {
+    return llama_get_embeddings(((llama_binding_state*) state_ptr)->ctx);
+}
+
+float* native_embeddings_nextn(void* state_ptr) {
+    return llama_get_embeddings_nextn(((llama_binding_state*) state_ptr)->ctx);
+}
+
+int get_embeddings_nextn_ith(void* state_ptr, int i, float* out, int out_size) {
+    llama_binding_state * state = (llama_binding_state*) state_ptr;
+    return copy_floats(llama_get_embeddings_nextn_ith(state->ctx, i),
+                       llama_model_n_embd_out(state->model), out, out_size);
+}
+
+bool set_embeddings_layer_inp(void* state_ptr, unsigned int layer, bool enabled) {
+    llama_binding_state * state = (llama_binding_state*) state_ptr;
+    if (layer > (unsigned int) llama_model_n_layer(state->model)) return false;
+    llama_set_embeddings_layer_inp(state->ctx, layer, enabled);
+    return true;
+}
+
+float* native_embeddings_layer_inp(void* state_ptr, unsigned int layer) {
+    llama_binding_state * state = (llama_binding_state*) state_ptr;
+    if (layer > (unsigned int) llama_model_n_layer(state->model)) return nullptr;
+    return llama_get_embeddings_layer_inp(state->ctx, layer);
+}
+
+void set_embeddings_layer_inp_dev(void* state_ptr, bool enabled) {
+    llama_set_embeddings_layer_inp_dev(((llama_binding_state*) state_ptr)->ctx, enabled);
+}
+
+bool supports_embd_row(void* state_ptr) {
+    return llama_supports_embd_row(((llama_binding_state*) state_ptr)->ctx);
+}
+
+bool set_embeddings_nextn_dev(void* state_ptr, bool enabled) {
+    return llama_set_embeddings_nextn_dev(((llama_binding_state*) state_ptr)->ctx, enabled);
+}
+
+bool get_embeddings_nextn_rows(void* state_ptr, long long row0, long long n_rows, float* out) {
+    return llama_get_embeddings_nextn_rows(((llama_binding_state*) state_ptr)->ctx, row0, n_rows, out);
+}
+
+bool set_embeddings_nextn_rows(void* state_ptr, long long row0, long long n_rows, const float* data) {
+    return llama_set_embeddings_nextn_rows(((llama_binding_state*) state_ptr)->ctx, row0, n_rows, data);
+}
+
+void attach_threadpool(void* state_ptr, void* threadpool, void* threadpool_batch) {
+    llama_attach_threadpool(((llama_binding_state*) state_ptr)->ctx,
+                            (ggml_threadpool_t) threadpool, (ggml_threadpool_t) threadpool_batch);
+}
+
+void detach_threadpool(void* state_ptr) {
+    llama_detach_threadpool(((llama_binding_state*) state_ptr)->ctx);
+}
+
+void* native_sampler_init(void* iface, void* ctx) {
+    llama_sampler_i * callbacks = (llama_sampler_i*) iface;
+    if (!callbacks || !callbacks->apply || !callbacks->name) return nullptr;
+    try {
+        return llama_sampler_init(callbacks, (llama_sampler_context_t) ctx);
+    } catch (const std::exception &) {
+        return nullptr;
+    }
+}
+
+static bool sampler_copy_compatible(llama_sampler * dest, llama_sampler * source) {
+    if (!dest || !source || !source->iface || dest->iface != source->iface) return false;
+    if (llama_sampler_chain_get(source, -1) == source) {
+        const int n = llama_sampler_chain_n(source);
+        if (llama_sampler_chain_n(dest) != n) return false;
+        for (int i = 0; i < n; ++i) {
+            if (!sampler_copy_compatible(llama_sampler_chain_get(dest, i),
+                                         llama_sampler_chain_get(source, i))) return false;
+        }
+    } else if (source->ctx && !source->iface->clone && !source->iface->copy_state) {
+        return false;
+    }
+    return true;
+}
+
+bool sampler_copy(void* dest, void* source) {
+    auto * dst = (llama_sampler*) dest;
+    auto * src = (llama_sampler*) source;
+    if (!sampler_copy_compatible(dst, src)) return false;
+    try {
+        llama_sampler_copy(src, dst);
+        return true;
+    } catch (const std::exception &) {
+        return false;
+    }
+}
+
+void perf_sampler_print(void* sampler) {
+    llama_perf_sampler_print((llama_sampler*) sampler);
+}
+
+bool opt_param_filter_all(const void* tensor, void* user_data) {
+    return llama_opt_param_filter_all((const ggml_tensor*) tensor, user_data);
+}
+
+bool opt_init(void* state_ptr, unsigned int n_ctx_train, int optimizer,
+              void* filter, void* filter_data, void* params, void* params_data) {
+    llama_binding_state * state = (llama_binding_state*) state_ptr;
+    if (state->optimizer_initialized ||
+        optimizer < 0 || optimizer >= GGML_OPT_OPTIMIZER_TYPE_COUNT) return false;
+    const uint32_t n_ctx = n_ctx_train ? n_ctx_train : llama_n_ctx(state->ctx);
+    const uint32_t n_batch = std::min(llama_n_batch(state->ctx), n_ctx);
+    const uint32_t n_ubatch = std::min(llama_n_ubatch(state->ctx), n_batch);
+    if (!n_ubatch || n_ctx % n_batch || n_batch % n_ubatch) return false;
+    llama_opt_params options{};
+    options.n_ctx_train = n_ctx_train;
+    options.optimizer_type = (ggml_opt_optimizer_type) optimizer;
+    options.param_filter = filter ? reinterpret_cast<llama_opt_param_filter>(filter) : llama_opt_param_filter_all;
+    options.param_filter_ud = filter_data;
+    options.get_opt_pars = params ? reinterpret_cast<ggml_opt_get_optimizer_params>(params) : ggml_opt_get_default_optimizer_params;
+    options.get_opt_pars_ud = params_data;
+    state->optimizer_initialized = true;
+    try {
+        llama_opt_init(state->ctx, state->model, options);
+        state->optimizer_ready = true;
+        return true;
+    } catch (const std::exception &) {
+        return false;
+    }
+}
+
+bool opt_epoch(void* state_ptr, void* dataset, void* train_result, void* eval_result,
+               long long split, void* train_callback, void* eval_callback) {
+    llama_binding_state * state = (llama_binding_state*) state_ptr;
+    auto data = (ggml_opt_dataset_t) dataset;
+    if (!state->optimizer_ready || !data || split < 0 || split > ggml_opt_dataset_ndata(data)) return false;
+    try {
+        llama_opt_epoch(state->ctx, data, (ggml_opt_result_t) train_result,
+                        (ggml_opt_result_t) eval_result, split,
+                        reinterpret_cast<ggml_opt_epoch_callback>(train_callback),
+                        reinterpret_cast<ggml_opt_epoch_callback>(eval_callback));
+        return true;
+    } catch (const std::exception &) {
+        return false;
     }
 }
 
@@ -747,9 +1011,16 @@ static int llama_predict_impl(binding_params* params_p, void* state_pr, char* re
                     n_eval = n_batch;
                 }
                 
-                llama_batch batch = llama_batch_get_one(&embd[i], n_eval);
-                
-                if (llama_decode(ctx, batch) != 0) {
+                auto batch = make_batch(ctx);
+                const llama_seq_id seq = 0;
+                const llama_pos pos = llama_memory_seq_pos_max(llama_get_memory(ctx), seq) + 1;
+                for (int j = 0; j < n_eval; ++j) {
+                    if (!append_batch_token(batch.get(), embd[i + j], pos + j, &seq, 1, j == n_eval - 1)) {
+                        return 1;
+                    }
+                }
+
+                if (llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch.get()) != 0) {
                     fprintf(stderr, "%s: failed to decode\n", __func__);
                     return 1;
                 }
@@ -868,9 +1139,7 @@ void llama_binding_free_model(void *state_ptr) {
 // llama_set_adapters_lora replaces the whole set, so the binding tracks every
 // applied adapter and re-applies them together. Returns 0 on success, non-zero
 // if the adapter could not be loaded or applied.
-int apply_lora_adapter(void* state_ptr, const char* path, float scale) {
-    llama_binding_state* state = (llama_binding_state*) state_ptr;
-    llama_adapter_lora * adapter = llama_adapter_lora_init(state->model, path);
+static int apply_lora(llama_binding_state* state, llama_adapter_lora* adapter, float scale) {
     if (adapter == nullptr) {
         return 1;
     }
@@ -878,6 +1147,16 @@ int apply_lora_adapter(void* state_ptr, const char* path, float scale) {
     state->lora_scales.push_back(scale);
     return llama_set_adapters_lora(state->ctx, state->lora_adapters.data(),
                                    state->lora_adapters.size(), state->lora_scales.data());
+}
+
+int apply_lora_adapter(void* state_ptr, const char* path, float scale) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return apply_lora(state, llama_adapter_lora_init(state->model, path), scale);
+}
+
+int apply_lora_adapter_file(void* state_ptr, void* file, float scale) {
+    llama_binding_state* state = (llama_binding_state*) state_ptr;
+    return apply_lora(state, llama_adapter_lora_init_from_file_ptr(state->model, (FILE*) file), scale);
 }
 
 // Detach and free every LoRA adapter previously applied via apply_lora_adapter.
@@ -1123,13 +1402,15 @@ static void* load_model_impl(const char **paths, int n_paths,
                  int n_ctx, int n_seed, bool memory_f16, bool mlock,
                  bool embeddings, bool mmap, bool low_vram, int n_gpu_layers, int n_batch,
                  const char *maingpu, const char *tensorsplit, bool numa, float rope_freq_base,
-                 float rope_freq_scale, const char *lora, const char *lora_base, int n_seq_max) {
+                 float rope_freq_scale, const char *lora, const char *lora_base, int n_seq_max,
+                 int ctx_type, void* paired_state, FILE* file, gguf_context* metadata,
+                 llama_model_set_tensor_data_t set_tensor_data, void* tensor_data_user) {
 
-    if (paths == nullptr || n_paths <= 0 || paths[0] == nullptr) {
+    if (!file && !metadata && (paths == nullptr || n_paths <= 0 || paths[0] == nullptr)) {
         fprintf(stderr, "%s: error: no model path given\n", __func__);
         return nullptr;
     }
-    const char *fname = paths[0];
+    const char *fname = file ? "(FILE*)" : metadata ? "(GGUF metadata)" : paths[0];
 
     // These parameters are retained for C ABI stability with the Go layer but
     // are no longer consumed by llama.cpp: the seed is applied when the sampler
@@ -1185,8 +1466,9 @@ static void* load_model_impl(const char **paths, int n_paths,
     }
 
     // Load model
-    llama_model * model = n_paths == 1
-        ? llama_model_load_from_file(fname, model_params)
+    llama_model * model = file ? llama_model_load_from_file_ptr(file, model_params)
+        : metadata ? llama_model_init_from_user(metadata, set_tensor_data, tensor_data_user, model_params)
+        : n_paths == 1 ? llama_model_load_from_file(fname, model_params)
         : llama_model_load_from_splits(paths, (size_t) n_paths, model_params);
     if (model == nullptr) {
         fprintf(stderr, "%s: error: failed to load model '%s'\n", __func__, fname);
@@ -1199,6 +1481,8 @@ static void* load_model_impl(const char **paths, int n_paths,
     ctx_params.n_batch = n_batch;
     ctx_params.n_ubatch = n_batch;
     ctx_params.embeddings = embeddings;
+    ctx_params.ctx_type = (llama_context_type) ctx_type;
+    ctx_params.ctx_other = paired_state ? ((llama_binding_state*) paired_state)->ctx : nullptr;
 
     // The number of sequences the context can hold. Sequence ids at or above
     // it are rejected by llama_decode, so the low-level multi-sequence API
@@ -1270,7 +1554,8 @@ void* load_model(const char *fname, int n_ctx, int n_seed, bool memory_f16, bool
     const char *paths[1] = { fname };
     return load_model_impl(paths, 1, n_ctx, n_seed, memory_f16, mlock, embeddings, mmap,
                            low_vram, n_gpu_layers, n_batch, maingpu, tensorsplit, numa,
-                           rope_freq_base, rope_freq_scale, lora, lora_base, n_seq_max);
+                           rope_freq_base, rope_freq_scale, lora, lora_base, n_seq_max,
+                           LLAMA_CONTEXT_TYPE_DEFAULT, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 // Loads a model from an explicit list of shards. Only needed when the shard
@@ -1280,10 +1565,34 @@ void* load_model_splits(const char **paths, int n_paths,
                         int n_ctx, int n_seed, bool memory_f16, bool mlock,
                         bool embeddings, bool mmap, bool low_vram, int n_gpu_layers, int n_batch,
                         const char *maingpu, const char *tensorsplit, bool numa, float rope_freq_base,
-                        float rope_freq_scale, const char *lora, const char *lora_base, int n_seq_max) {
+                        float rope_freq_scale, const char *lora, const char *lora_base, int n_seq_max,
+                        int ctx_type, void* paired_state, void* file, void* metadata,
+                        void* set_tensor_data, void* tensor_data_user) {
     return load_model_impl(paths, n_paths, n_ctx, n_seed, memory_f16, mlock, embeddings, mmap,
                            low_vram, n_gpu_layers, n_batch, maingpu, tensorsplit, numa,
-                           rope_freq_base, rope_freq_scale, lora, lora_base, n_seq_max);
+                           rope_freq_base, rope_freq_scale, lora, lora_base, n_seq_max,
+                           ctx_type, paired_state, (FILE*) file, (gguf_context*) metadata,
+                           reinterpret_cast<llama_model_set_tensor_data_t>(set_tensor_data), tensor_data_user);
+}
+
+void* open_file_at(const char* path, long long offset) {
+    if (!path || offset < 0) return nullptr;
+    FILE * file = fopen(path, "rb");
+    if (!file) return nullptr;
+#if defined(_WIN32)
+    const int ret = _fseeki64(file, offset, SEEK_SET);
+#else
+    const int ret = fseeko(file, (off_t) offset, SEEK_SET);
+#endif
+    if (ret != 0) {
+        fclose(file);
+        return nullptr;
+    }
+    return file;
+}
+
+void close_native_file(void* file) {
+    if (file) fclose((FILE*) file);
 }
 
 // Model info functions
@@ -1375,6 +1684,14 @@ int get_model_meta_key_by_index(void* state_ptr, int i, char* buf, int buf_size)
 int get_model_meta_val_str_by_index(void* state_ptr, int i, char* buf, int buf_size) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
     return llama_model_meta_val_str_by_index(state->model, i, buf, (size_t) buf_size);
+}
+
+int get_model_meta_arr_n(void* state_ptr, const char* key) {
+    return llama_model_meta_arr_n(((llama_binding_state*) state_ptr)->model, key);
+}
+
+const char* get_model_meta_arr_str(void* state_ptr, const char* key, int i) {
+    return llama_model_meta_arr_str(((llama_binding_state*) state_ptr)->model, key, i);
 }
 
 // Special token functions
@@ -1640,6 +1957,9 @@ void* sampler_init_temp_ext(float t, float delta, float exponent) { return llama
 void* sampler_init_xtc(float p, float t, int min_keep, unsigned int seed) { return llama_sampler_init_xtc(p, t, (size_t) min_keep, seed); }
 void* sampler_init_top_n_sigma(float n)            { return llama_sampler_init_top_n_sigma(n); }
 void* sampler_init_mirostat_v2(unsigned int seed, float tau, float eta) { return llama_sampler_init_mirostat_v2(seed, tau, eta); }
+void* sampler_init_mirostat_v1(int n_vocab, unsigned int seed, float tau, float eta, int m) {
+    return llama_sampler_init_mirostat(n_vocab, seed, tau, eta, m);
+}
 void* sampler_init_penalties(void* state_ptr, int last_n, float repeat, float freq, float present) {
     llama_binding_state* state = (llama_binding_state*) state_ptr;
     const llama_vocab* vocab = llama_model_get_vocab(state->model);
@@ -2759,7 +3079,7 @@ int load_mode_from_str(const char* str) {
     }
     for (int mode = LLAMA_LOAD_MODE_AUTO; is_load_mode(mode); mode++) {
         if (strcmp(str, llama_load_mode_name((enum llama_load_mode) mode)) == 0) {
-            return mode;
+            return llama_load_mode_from_str(str);
         }
     }
     fprintf(stderr, "%s: unknown load mode: %s\n", __func__, str);

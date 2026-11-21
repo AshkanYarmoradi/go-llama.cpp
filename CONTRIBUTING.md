@@ -153,7 +153,7 @@ aborts on:
   `llama_flash_attn_type_name`, `llama_load_mode_name`. Range-check first.
 - `llama_load_mode_from_str` aborts on a name it does not recognise. Match
   against the engine's own names first, as `load_mode_from_str` does.
-- `llama_decode` asserts that a batch fits in `n_batch`. `decode_batch` checks
+- `llama_process` asserts that a batch fits in `n_batch`. `decode_batch` checks
   against `max_batch_tokens` first, so `Decode` returns -1 instead.
 - The KV-cache operations assert on a sequence id at or past `n_seq_max`. The
   `memory_seq_*` wrappers check with `seq_in_range`, and the `state_seq_*`
@@ -341,8 +341,9 @@ When the check fails:
 
 1. Read its added/changed/removed declarations and the upstream diff.
 2. Adapt `binding.cpp`, `binding.h`, `llama.go` and `options.go` as needed,
-   with tests for any new Go behaviour. Or decide explicitly to defer/exclude
-   an API and explain why. Fields and enum members are reviewed with their
+   with tests for any new Go behaviour. Every live function must be bound;
+   for APIs that require native ggml objects, expose their native handles
+   with explicit ownership and lifetime requirements. Fields and enum members are reviewed with their
    containing struct or enum, so new members of an excluded type still fail.
 3. Record each decision, using the exact item name from the failure:
 
@@ -350,16 +351,19 @@ When the check fails:
    go run ./scripts/api-review -review 'struct llama_model_params' \
      -decision supported -reason 'New option exposed through its Go ModelOption; tested in llama_test.go.'
    go run ./scripts/api-review -review 'function llama_opt_init' \
-     -decision excluded -reason 'Training remains outside this inference binding.'
+     -decision supported -reason 'Native optimizer initialization is exposed through InitNativeOptimizer.'
    ```
 
-   Use `deferred` with a reason for a planned API. Use `removed` after reviewing
+   Use `deferred` with a reason for a planned field or other non-function API;
+   a deferred live function still fails the independent coverage requirement.
+   Use `removed` after reviewing
    an upstream removal and handling its callers. Every decision requires a
    reason; exclusions only approve the exact declaration reviewed. There is no
    bulk approval command. `-list` prints the current declarations without
    changing approvals.
 4. Run `go run ./scripts/api-review` again, refresh the coverage report when
-   needed, and commit the manifest with the code and tests. Reviewers should
+   needed, run `./scripts/engine-coverage.sh --require-complete`, and commit
+   the manifest with the code and tests. Reviewers should
    check the recorded reasons alongside the implementation; this check records
    review decisions, it cannot prove that their claims are correct.
 

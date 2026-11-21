@@ -14,6 +14,15 @@ than numbered, so entries are not yet grouped by release. Each one below is on
 
 ### Added
 
+- **Complete live llama.cpp function coverage.** The remaining live APIs are
+  now exposed, including context-bound extended batches, TTS metadata arrays,
+  DFlash/NextN and device embedding rows, native model and adapter file
+  loading, threadpools, custom samplers, sampler copying, and native training
+  interfaces. Lint now requires coverage of every live function in `llama.h`.
+- **Extended batch migration.** Existing `NewBatch`, `Decode`, `Encode`,
+  `Predict`, and embedding calls now use `llama_batch_ext` and `llama_process`
+  without requiring existing users to change their Go code.
+
 - **Required upstream API review.** Lint now fails on unreviewed public
   llama.cpp functions, struct fields, enums and typedefs. Exact declarations
   and decisions are recorded in `scripts/api-review/reviewed.json`;
